@@ -1,0 +1,10 @@
+accelerate
+fire
+interegular
+regex==2023.8.8
+syncode
+torch
+tqdm
+transformers==4.51.0; python_version < "3.13"
+datasets
+jsonschema
