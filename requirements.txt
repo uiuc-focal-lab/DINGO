@@ -5,6 +5,13 @@ regex==2023.8.8
 syncode
 torch
 tqdm
-transformers==4.51.0; python_version < "3.13"
+transformers==4.38.2
 datasets
 jsonschema
+intxeger
+word2number
+Pebble
+timeout-decorator
+func_timeout
+z3-solver
+ray

@@ -159,6 +159,13 @@ class TokenTransitionsTest(unittest.TestCase):
         pattern = r"[A-Za-z0-9 \-_]+"
         return self.run_pattern_test(pattern)
     
+    def test_gsm_symbolic(self):
+        """Test with a pattern for a specific user JSON schema with multiple properties."""
+        print("\n==== TESTING GSM SYMBOLIC ====")
+        pattern = r'<<( )?(\(){0,3}( )?([a-z]|[0-9]{1,3})( )?(\)){0,3}(( )?([+\-]|\/\/|\/|%|\*|\*\*)( )?((\(){0,3}( )?)?([a-z]|[0-9]{1,3})( )?(\)){0,3})*( )?>>'
+
+        return self.run_pattern_test(pattern)
+    
     def test_user_json_schema(self):
         """Test with a pattern for a specific user JSON schema with multiple properties."""
         print("\n==== TESTING USER JSON SCHEMA ====")
@@ -190,11 +197,12 @@ if __name__ == "__main__":
     
     # Choose which patterns to test
     patterns_to_test = [
-        "test_simple_pattern",
-        "test_date_pattern",
-        "test_product_name_pattern",
-        "test_user_json_schema",
-        "test_product_catalog_schema"
+        # "test_simple_pattern",
+        # "test_date_pattern",
+        # "test_product_name_pattern",
+        # "test_user_json_schema",
+        # "test_product_catalog_schema",
+        "test_gsm_symbolic"
     ]
     
     results = []
