@@ -59,7 +59,7 @@ def naive_matrix_build(transitions_by_state, max_tokens_transition):
 
 @ torch.no_grad()
 def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-             cfg_scale=0., remasking='low_confidence', mask_id=126336, transitions_by_state=None, initial_state=None, final_states=None, max_tokens_transition=None):
+             cfg_scale=0., remasking='low_confidence', mask_id=126336, transitions_by_state=None, initial_state=None, final_states=None, transition_matrix=None):
     '''
     Args:
         model: Mask predictor.
@@ -74,8 +74,6 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
     '''
     x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
-    
-    transition_matrix = naive_matrix_build(transitions_by_state, max_tokens_transition)
 
     prompt_index = (x != mask_id)
 
@@ -296,8 +294,10 @@ def run_pattern_test(pattern, tokenizer):
             transitions_shown += 1
             
         states_shown += 1
+    
+    transition_matrix = naive_matrix_build(transitions_by_state, max_tokens_transition)
 
-    return transitions_by_state, dfa.initial,dfa.finals, max_tokens_transition
+    return transitions_by_state, dfa.initial,dfa.finals, transition_matrix
 
 def main():
     device = 'cuda'
@@ -316,9 +316,9 @@ def main():
     
     pattern = r'(ab)+'
     
-    transitions_by_state, initial_state, final_states, max_tokens_transition = run_pattern_test(pattern, tokenizer)
+    transitions_by_state, initial_state, final_states, transition_matrix = run_pattern_test(pattern, tokenizer)
 
-    out = generate(model, input_ids, steps=1, gen_length=4, block_length=4, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=final_states, max_tokens_transition=max_tokens_transition)
+    out = generate(model, input_ids, steps=1, gen_length=4, block_length=4, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=final_states, transition_matrix=transition_matrix)
     print(tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0])
 
 
