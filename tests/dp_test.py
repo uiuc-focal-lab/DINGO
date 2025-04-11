@@ -47,7 +47,14 @@ def get_num_transfer_tokens(mask_index, steps):
     return num_transfer_tokens 
 
 def naive_matrix_build(transitions_by_state, max_tokens_transition): 
-    transition_matrix = torch.zeros((len(transitions_by_state), len(transitions_by_state), max_tokens_transition), dtype=torch.long) - 1
+    max_key = -1
+    for state in transitions_by_state: 
+        for next_state in transitions_by_state[state]:  
+            max_key = max(max_key, state, next_state) 
+    
+    assert max_key >= 0
+    
+    transition_matrix = torch.zeros(max_key + 1, max_key + 1, max_tokens_transition, dtype=torch.long) - 1
     for state, transitions in transitions_by_state.items():
         for next_state, token_ids in transitions.items(): 
             transition_matrix[state, next_state, :len(token_ids)] = torch.tensor(token_ids, dtype=torch.long)
@@ -93,7 +100,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
     assert steps % num_blocks == 0
     steps = steps // num_blocks
 
-    num_states = len(transitions_by_state)
+    num_states = transition_matrix.shape[0]
 
     cost_vector = x.new_full((num_states, gen_length + 1),
                              fill_value=-float('inf'), dtype=torch.float)
@@ -317,11 +324,11 @@ def main():
     input_ids = tokenizer(prompt)['input_ids']
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
     
-    pattern = r'(ab)+'
+    pattern = r'<<( )?(\(){0,3}( )?([a-z]|[0-9]{1,3})( )?(\)){0,3}(( )?([+\-]|\/\/|\/|%|\*|\*\*)( )?((\(){0,3}( )?)?([a-z]|[0-9]{1,3})( )?(\)){0,3})*( )?>>'
     
     transitions_by_state, initial_state, final_states, transition_matrix = run_pattern_test(pattern, tokenizer)
 
-    out = generate(model, input_ids, steps=1, gen_length=4, block_length=4, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=sorted(list(final_states)), transition_matrix=transition_matrix)
+    out = generate(model, input_ids, steps=1, gen_length=8, block_length=8, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=sorted(list(final_states)), transition_matrix=transition_matrix)
     print(tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0])
 
 
