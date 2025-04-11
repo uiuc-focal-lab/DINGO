@@ -57,22 +57,32 @@ def naive_matrix_build(transitions_by_state, max_tokens_transition):
 
 
 
-@ torch.no_grad()
-def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
-             cfg_scale=0., remasking='low_confidence', mask_id=126336, transitions_by_state=None, initial_state=None, final_states=None, transition_matrix=None):
+@torch.no_grad()
+def generate(model, prompt, steps=128, gen_length=128, block_length=128,
+             temperature=0., cfg_scale=0., remasking='low_confidence',
+             mask_id=126336, transitions_by_state=None,
+             initial_state=None, final_states=None, transition_matrix=None):
     '''
     Args:
         model: Mask predictor.
         prompt: A tensor of shape (1, L).
         steps: Sampling steps, less than or equal to gen_length.
         gen_length: Generated answer length.
-        block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
+        block_length: Block length, less than or equal to gen_length.
+                      If < gen_length, we do semi-autoregressive remasking.
         temperature: Categorical distribution sampling temperature.
         cfg_scale: Unsupervised classifier-free guidance scale.
         remasking: Remasking strategy. 'low_confidence' or 'random'.
-        mask_id: The toke id of [MASK] is 126336.
+        mask_id: The token id of [MASK] is 126336.
+        transitions_by_state: A representation of the states in your FSA.
+        initial_state: The ID of the start state in transitions_by_state.
+        final_states: A list of valid final states.
+        transition_matrix: transition_matrix[q, q'] = [list of valid tokens
+                         that take state q -> q'] or -1 if invalid.
     '''
-    x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+
+    x = torch.full((1, prompt.shape[1] + gen_length),
+                   mask_id, dtype=torch.long).to(model.device)
     x[:, :prompt.shape[1]] = prompt.clone()
 
     prompt_index = (x != mask_id)
@@ -82,19 +92,25 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
 
     assert steps % num_blocks == 0
     steps = steps // num_blocks
-    
-    cost_vector = torch.zeros((len(transitions_by_state), gen_length + 1), device=x.device) - torch.inf
-    cost_vector[initial_state, 0] = 0
-    
-    selected_tokens = torch.zeros((len(transitions_by_state), gen_length + 1), device=x.device, dtype=torch.long) - 1
-    
+
+    num_states = len(transitions_by_state)
+
+    cost_vector = x.new_full((num_states, gen_length + 1),
+                             fill_value=-float('inf'), dtype=torch.float)
+    cost_vector[initial_state, 0] = 0.0
+
+    selected_tokens = torch.full((num_states, gen_length + 1),
+                                 -1, device=x.device, dtype=torch.long)
+
+    selected_sources = torch.full((num_states, gen_length + 1),
+                                  -1, device=x.device, dtype=torch.long)
+
     vec_iter = 0
 
     for num_block in range(num_blocks):
         start_gen_idx = prompt.shape[1] + num_block * block_length
-        end_gen_idx = prompt.shape[1] + (num_block + 1) * block_length
-        
-        block_mask_index = (x[:, start_gen_idx: end_gen_idx] == mask_id)
+        end_gen_idx   = prompt.shape[1] + (num_block + 1) * block_length
+        block_mask_index = (x[:, start_gen_idx:end_gen_idx] == mask_id)
         num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
         for i in range(steps):
             mask_index = (x == mask_id)
@@ -109,63 +125,57 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
                 logits = model(x).logits
             
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-            
-            gen_logits = logits_with_noise[:, start_gen_idx: end_gen_idx, :]
 
-            
-            gen_log_probs = F.log_softmax(gen_logits, dim=-1)[0]  # [block_length, vocab_size]
-            
-            current_cost = cost_vector[:, vec_iter]  
-            num_states = len(current_cost)
-            
-            
-            valid_mask = transition_matrix >= 0 
+            gen_logits = logits_with_noise[:, start_gen_idx:end_gen_idx, :] 
+            gen_log_probs = F.log_softmax(gen_logits, dim=-1)[0]
+
+            current_cost = cost_vector[:, vec_iter] 
+
+            valid_mask = (transition_matrix >= 0)
 
             for pos in range(block_length):
-                token_log_probs = gen_log_probs[pos]
-                
+                token_log_probs = gen_log_probs[pos]  
 
-                max_transition_log_probs = torch.zeros((num_states, num_states), device=gen_log_probs.device) - torch.inf
-                max_transition_tokens = torch.zeros((num_states, num_states), device=gen_log_probs.device, dtype=torch.long) - 1
+                max_transition_log_probs = token_log_probs.new_full(
+                    (num_states, num_states), fill_value=-float('inf')
+                )
+                max_transition_tokens = torch.full(
+                    (num_states, num_states), -1,
+                    device=gen_log_probs.device, dtype=torch.long
+                )
 
                 for q in range(num_states):
-                    if current_cost[q] == -torch.inf:
-                        continue 
-                        
+                    if current_cost[q] == -float('inf'):
+                        continue
                     for q_prime in range(num_states):
                         valid_indices = valid_mask[q, q_prime]
                         if not valid_indices.any():
-                            continue 
-                        
+                            continue
+
                         valid_tokens = transition_matrix[q, q_prime][valid_indices]
                         if len(valid_tokens) > 0:
-                            token_probs = token_log_probs[valid_tokens]
-                            max_idx = torch.argmax(token_probs)
-                            max_transition_log_probs[q, q_prime] = token_probs[max_idx]
-                            max_transition_tokens[q, q_prime] = valid_tokens[max_idx]
+                            t_probs = token_log_probs[valid_tokens]
+                            max_idx = torch.argmax(t_probs)
+                            max_transition_log_probs[q, q_prime] = t_probs[max_idx]
+                            max_transition_tokens[q, q_prime]    = valid_tokens[max_idx]
 
-                
                 weighted_log_probs = max_transition_log_probs + current_cost.unsqueeze(1)
-                
-        
+
                 max_values, max_indices = torch.max(weighted_log_probs, dim=0)
                 next_cost = max_values
-                
 
                 for q_prime in range(num_states):
-                    if torch.any(weighted_log_probs[:, q_prime] > -torch.inf):
+                    if next_cost[q_prime] != -float('inf'):
                         best_source = max_indices[q_prime]
-                        selected_tokens[q_prime, vec_iter+1] = max_transition_tokens[best_source, q_prime]
+                        selected_tokens[q_prime, vec_iter + 1] = max_transition_tokens[best_source, q_prime]
+                        selected_sources[q_prime, vec_iter + 1] = best_source
 
                 current_cost = next_cost
                 vec_iter += 1
                 cost_vector[:, vec_iter] = current_cost
             
+            x0 = torch.argmax(logits_with_noise, dim=-1)  
 
-            x0 = torch.argmax(logits_with_noise, dim=-1)
-            
-            mask_index = (x == mask_id)
-            
             if remasking == 'low_confidence':
                 p = F.softmax(logits.to(torch.float64), dim=-1)
                 x0_p = torch.squeeze(
@@ -186,34 +196,24 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128, tempera
                 transfer_index[j, select_index] = True
             x[transfer_index] = x0[transfer_index]
 
-    # Find the final state with the highest cost
-    final_costs = torch.full((1,), -torch.inf, device=x.device)
-    for state in final_states:
-        if state < cost_vector.shape[0]:
-            final_costs = torch.max(final_costs, cost_vector[state, vec_iter])
-    
-    best_final_state = None
-    for state in final_states:
-        if state < cost_vector.shape[0] and cost_vector[state, vec_iter] == final_costs:
-            best_final_state = state
-            break
+    final_time = vec_iter
+    final_costs = cost_vector[final_states, final_time] 
+    best_final_index = torch.argmax(final_costs)
+    best_state = final_states[best_final_index]
+    best_cost  = final_costs[best_final_index]
 
-    if best_final_state is not None:
-        best_tokens = []
-        current_state = best_final_state
-        for pos in range(vec_iter, 0, -1):
-            token = selected_tokens[current_state, pos]
-            if token >= 0: 
-                best_tokens.insert(0, token)
-                for prev_state in range(len(transitions_by_state)):
-                    if (prev_state in transitions_by_state and 
-                        current_state in transitions_by_state[prev_state] and 
-                        int(token.item()) in transitions_by_state[prev_state][current_state]):
-                        current_state = prev_state
-                        break
-        
-        x[0, prompt.shape[1]:] = torch.tensor(best_tokens, dtype=torch.long, device=x.device)
-    
+    token_path = []
+    curr_state = best_state
+
+    for t in range(final_time, 0, -1):
+        tok = selected_tokens[curr_state, t].item()  
+        token_path.append(tok)
+        curr_state = selected_sources[curr_state, t] 
+
+    token_path.reverse()
+
+    x[:, prompt.shape[1]:] = torch.tensor(token_path, dtype=torch.long, device=x.device)
+
     return x
 
 
@@ -318,7 +318,7 @@ def main():
     
     transitions_by_state, initial_state, final_states, transition_matrix = run_pattern_test(pattern, tokenizer)
 
-    out = generate(model, input_ids, steps=1, gen_length=4, block_length=4, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=final_states, transition_matrix=transition_matrix)
+    out = generate(model, input_ids, steps=1, gen_length=8, block_length=8, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=sorted(list(final_states)), transition_matrix=transition_matrix)
     print(tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0])
 
 
