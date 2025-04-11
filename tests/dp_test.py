@@ -102,9 +102,8 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
 
     num_states = transition_matrix.shape[0]
 
-    cost_vector = x.new_full((num_states, gen_length + 1),
-                             fill_value=-float('inf'), dtype=torch.float)
-    cost_vector[initial_state, 0] = 0.0
+    cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
+    cost_vector[initial_state] = 0.0
 
     selected_tokens = torch.full((num_states, gen_length + 1),
                                  -1, device=x.device, dtype=torch.long)
@@ -121,6 +120,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
         num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
         vec_iter = global_vec_iter
         for i in range(steps):
+            current_cost = cost_vector.clone()
             vec_iter = global_vec_iter
             mask_index = (x == mask_id)
             if cfg_scale > 0.:
@@ -137,8 +137,6 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
 
             gen_logits = logits_with_noise[:, start_gen_idx:end_gen_idx, :] 
             gen_log_probs = F.log_softmax(gen_logits, dim=-1)[0]
-
-            current_cost = cost_vector[:, vec_iter] 
 
             valid_mask = (transition_matrix >= 0)
 
@@ -181,8 +179,9 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
 
                 current_cost = next_cost
                 vec_iter += 1
-                cost_vector[:, vec_iter] = current_cost
             
+            cost_vector = current_cost
+    
             x0 = torch.argmax(logits_with_noise, dim=-1)  
 
             if remasking == 'low_confidence':
@@ -207,7 +206,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
 
         global_vec_iter = vec_iter
     final_time = global_vec_iter
-    final_costs = cost_vector[final_states, final_time] 
+    final_costs = cost_vector[final_states] 
     best_final_index = torch.argmax(final_costs)
     best_state = final_states[best_final_index]
     best_cost  = final_costs[best_final_index]
