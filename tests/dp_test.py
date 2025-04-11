@@ -105,14 +105,16 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
     selected_sources = torch.full((num_states, gen_length + 1),
                                   -1, device=x.device, dtype=torch.long)
 
-    vec_iter = 0
+    global_vec_iter = 0
 
     for num_block in range(num_blocks):
         start_gen_idx = prompt.shape[1] + num_block * block_length
         end_gen_idx   = prompt.shape[1] + (num_block + 1) * block_length
         block_mask_index = (x[:, start_gen_idx:end_gen_idx] == mask_id)
         num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
+        vec_iter = global_vec_iter
         for i in range(steps):
+            vec_iter = global_vec_iter
             mask_index = (x == mask_id)
             if cfg_scale > 0.:
                 un_x = x.clone()
@@ -196,7 +198,8 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
                 transfer_index[j, select_index] = True
             x[transfer_index] = x0[transfer_index]
 
-    final_time = vec_iter
+        global_vec_iter = vec_iter
+    final_time = global_vec_iter
     final_costs = cost_vector[final_states, final_time] 
     best_final_index = torch.argmax(final_costs)
     best_state = final_states[best_final_index]
@@ -318,7 +321,7 @@ def main():
     
     transitions_by_state, initial_state, final_states, transition_matrix = run_pattern_test(pattern, tokenizer)
 
-    out = generate(model, input_ids, steps=1, gen_length=8, block_length=8, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=sorted(list(final_states)), transition_matrix=transition_matrix)
+    out = generate(model, input_ids, steps=1, gen_length=4, block_length=4, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=sorted(list(final_states)), transition_matrix=transition_matrix)
     print(tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0])
 
 
