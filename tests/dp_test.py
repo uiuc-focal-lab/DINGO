@@ -119,6 +119,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
         block_mask_index = (x[:, start_gen_idx:end_gen_idx] == mask_id)
         num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
         vec_iter = global_vec_iter
+        current_cost = cost_vector.clone()
         for i in range(steps):
             current_cost = cost_vector.clone()
             vec_iter = global_vec_iter
@@ -180,9 +181,16 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
                 current_cost = next_cost
                 vec_iter += 1
             
-            cost_vector = current_cost
-    
             x0 = torch.argmax(logits_with_noise, dim=-1)  
+
+            best_intermediate_state = torch.argmax(current_cost)
+            token_path = []
+            for t in range(vec_iter, global_vec_iter, -1):
+                tok = selected_tokens[best_intermediate_state, t].item()  
+                token_path.append(tok)
+                best_intermediate_state = selected_sources[best_intermediate_state, t] 
+            token_path.reverse()
+            x0[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
 
             if remasking == 'low_confidence':
                 p = F.softmax(logits.to(torch.float64), dim=-1)
@@ -205,6 +213,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
             x[transfer_index] = x0[transfer_index]
 
         global_vec_iter = vec_iter
+        cost_vector = current_cost
     final_time = global_vec_iter
     final_costs = cost_vector[final_states] 
     best_final_index = torch.argmax(final_costs)
@@ -327,7 +336,7 @@ def main():
     
     transitions_by_state, initial_state, final_states, transition_matrix = run_pattern_test(pattern, tokenizer)
 
-    out = generate(model, input_ids, steps=1, gen_length=8, block_length=8, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=sorted(list(final_states)), transition_matrix=transition_matrix)
+    out = generate(model, input_ids, steps=2, gen_length=8, block_length=8, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=sorted(list(final_states)), transition_matrix=transition_matrix)
     print(tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0])
 
 
