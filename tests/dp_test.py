@@ -65,7 +65,7 @@ def naive_matrix_build(transitions_by_state, max_tokens_transition):
 
 
 @torch.no_grad()
-def generate(model, prompt, steps=128, gen_length=128, block_length=128,
+def generate_constrained(model, prompt, steps=128, gen_length=128, block_length=128,
              temperature=0., cfg_scale=0., remasking='low_confidence',
              mask_id=126336, transitions_by_state=None,
              initial_state=None, final_states=None, transition_matrix=None):
@@ -120,6 +120,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
         num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
         vec_iter = global_vec_iter
         current_cost = cost_vector.clone()
+        step_start = time.time()
         for i in range(steps):
             current_cost = cost_vector.clone()
             vec_iter = global_vec_iter
@@ -132,57 +133,81 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
                 logits, un_logits = torch.chunk(logits, 2, dim=0)
                 logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
             else:
+                forward_pass_start = time.time()
                 logits = model(x).logits
-            
+                print(f"Forward pass took {time.time() - forward_pass_start:.4f} seconds")
             logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
 
             gen_logits = logits_with_noise[:, start_gen_idx:end_gen_idx, :] 
             gen_log_probs = F.log_softmax(gen_logits, dim=-1)[0]
 
             valid_mask = (transition_matrix >= 0)
+            block_start = time.time()
+            
+            
+
+            gen_log_probs = gen_log_probs.unsqueeze(1).unsqueeze(2)  # => [block_length, 1, 1, vocab_size]
+            gen_log_probs = gen_log_probs.expand(-1, num_states, num_states, -1)
+
+            # transition_matrix shape: [num_states, num_states, max_tokens_per_transition]
+            # valid_mask shape: [num_states, num_states, max_tokens_per_transition]
+
+            # 1) clamp negative indices to 0
+            clamped_indices = transition_matrix.clamp(min=0)
+
+            # 2) expand to 4D
+            clamped_indices_4d = clamped_indices.unsqueeze(0).expand(
+                gen_log_probs.shape[0], -1, -1, -1
+            ).to(gen_log_probs.device)
+            # shape: [block_length, num_states, num_states, max_tokens_per_transition]
+
+            # 3) gather
+            gathered_log_probs = torch.gather(
+                gen_log_probs,  # [block_length, num_states, num_states, vocab_size]
+                dim=3,
+                index=clamped_indices_4d
+            )
+            # => shape: [block_length, num_states, num_states, max_tokens_per_transition]
+
+            # 4) mask out the invalid transitions
+            valid_mask_4d = (transition_matrix >= 0).unsqueeze(0).expand(
+                gen_log_probs.shape[0], -1, -1, -1,
+            ).to(x.device)
+            gathered_log_probs = gathered_log_probs.masked_fill(~valid_mask_4d, float('-inf'))
+
+            # 5) max over the last dimension => best among tokens
+            max_log_probs, best_tokens_idx = gathered_log_probs.max(dim=3)
+            
+            best_tokens = torch.gather(
+                clamped_indices_4d, dim=3, index=best_tokens_idx.unsqueeze(3)
+            ).squeeze(3)
 
             for pos in range(block_length):
-                token_log_probs = gen_log_probs[pos]  
+                # max_log_probs[pos] => shape [num_states, num_states]
+                # best_tokens[pos]   => shape [num_states, num_states]
 
-                max_transition_log_probs = token_log_probs.new_full(
-                    (num_states, num_states), fill_value=-float('inf')
-                )
-                max_transition_tokens = torch.full(
-                    (num_states, num_states), -1,
-                    device=gen_log_probs.device, dtype=torch.long
-                )
+                # Weighted log-probs = cost(q) + max_log_probs[pos,q,q']
+                weighted_log_probs = max_log_probs[pos] + current_cost.unsqueeze(1)
+                # shape => [num_states, num_states]
 
-                for q in range(num_states):
-                    if current_cost[q] == -float('inf'):
-                        continue
-                    for q_prime in range(num_states):
-                        valid_indices = valid_mask[q, q_prime]
-                        if not valid_indices.any():
-                            continue
-
-                        valid_tokens = transition_matrix[q, q_prime][valid_indices]
-                        if len(valid_tokens) > 0:
-                            t_probs = token_log_probs[valid_tokens]
-                            max_idx = torch.argmax(t_probs)
-                            max_transition_log_probs[q, q_prime] = t_probs[max_idx]
-                            max_transition_tokens[q, q_prime]    = valid_tokens[max_idx]
-
-                weighted_log_probs = max_transition_log_probs + current_cost.unsqueeze(1)
-
+                # next_cost[q'] = max over q
                 max_values, max_indices = torch.max(weighted_log_probs, dim=0)
-                next_cost = max_values
+                next_cost = max_values  # shape [num_states]
 
+                # record back-pointer
                 for q_prime in range(num_states):
-                    if next_cost[q_prime] != -float('inf'):
+                    if next_cost[q_prime] != float('-inf'):
                         best_source = max_indices[q_prime]
-                        selected_tokens[q_prime, vec_iter + 1] = max_transition_tokens[best_source, q_prime]
-                        selected_sources[q_prime, vec_iter + 1] = best_source
+                        selected_tokens[q_prime, vec_iter+1] = best_tokens[pos, best_source, q_prime]
+                        selected_sources[q_prime, vec_iter+1] = best_source
 
                 current_cost = next_cost
                 vec_iter += 1
             
+            print(f"block {i} took {time.time() - block_start:.4f} seconds")
             x0 = torch.argmax(logits_with_noise, dim=-1)  
 
+            back_pointer_start = time.time()
             best_intermediate_state = torch.argmax(current_cost)
             token_path = []
             for t in range(vec_iter, global_vec_iter, -1):
@@ -191,6 +216,7 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
                 best_intermediate_state = selected_sources[best_intermediate_state, t] 
             token_path.reverse()
             x0[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
+            print(f"Back translate took {time.time() - back_pointer_start:.4f} seconds")
 
             if remasking == 'low_confidence':
                 p = F.softmax(logits.to(torch.float64), dim=-1)
@@ -212,6 +238,8 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
                 transfer_index[j, select_index] = True
             x[transfer_index] = x0[transfer_index]
 
+        step_end = time.time()
+        print(f"Step {i} took {step_end - step_start:.4f} seconds")
         global_vec_iter = vec_iter
         cost_vector = current_cost
     final_time = global_vec_iter
@@ -234,6 +262,74 @@ def generate(model, prompt, steps=128, gen_length=128, block_length=128,
 
     return x
 
+
+@ torch.no_grad()
+def generate(model, prompt, steps=128, gen_length=128, block_length=128, temperature=0.,
+             cfg_scale=0., remasking='low_confidence', mask_id=126336):
+    '''
+    Args:
+        model: Mask predictor.
+        prompt: A tensor of shape (1, L).
+        steps: Sampling steps, less than or equal to gen_length.
+        gen_length: Generated answer length.
+        block_length: Block length, less than or equal to gen_length. If less than gen_length, it means using semi_autoregressive remasking.
+        temperature: Categorical distribution sampling temperature.
+        cfg_scale: Unsupervised classifier-free guidance scale.
+        remasking: Remasking strategy. 'low_confidence' or 'random'.
+        mask_id: The toke id of [MASK] is 126336.
+    '''
+    x = torch.full((1, prompt.shape[1] + gen_length), mask_id, dtype=torch.long).to(model.device)
+    x[:, :prompt.shape[1]] = prompt.clone()
+
+    prompt_index = (x != mask_id)
+
+    assert gen_length % block_length == 0
+    num_blocks = gen_length // block_length
+
+    assert steps % num_blocks == 0
+    steps = steps // num_blocks
+
+    for num_block in range(num_blocks):
+        block_mask_index = (x[:, prompt.shape[1] + num_block * block_length: prompt.shape[1] + (num_block + 1) * block_length:] == mask_id)
+        num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
+        for i in range(steps):
+            mask_index = (x == mask_id)
+            if cfg_scale > 0.:
+                un_x = x.clone()
+                un_x[prompt_index] = mask_id
+                x_ = torch.cat([x, un_x], dim=0)
+                logits = model(x_).logits
+                logits, un_logits = torch.chunk(logits, 2, dim=0)
+                logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
+            else:
+                forward_pass_start = time.time()
+                logits = model(x).logits
+                print(f"Forward pass took {time.time() - forward_pass_start:.4f} seconds")
+
+            logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
+            x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
+
+            if remasking == 'low_confidence':
+                p = F.softmax(logits.to(torch.float64), dim=-1)
+                x0_p = torch.squeeze(
+                    torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
+            elif remasking == 'random':
+                x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
+            else:
+                raise NotImplementedError(remasking)
+
+            x0_p[:, prompt.shape[1] + (num_block + 1) * block_length:] = -np.inf
+
+            x0 = torch.where(mask_index, x0, x)
+            confidence = torch.where(mask_index, x0_p, -np.inf)
+
+            transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
+            for j in range(confidence.shape[0]):
+                _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
+                transfer_index[j, select_index] = True
+            x[transfer_index] = x0[transfer_index]
+
+    return x
 
 def run_pattern_test(pattern, tokenizer):
     """
@@ -277,6 +373,16 @@ def run_pattern_test(pattern, tokenizer):
             if next_state not in transitions_by_state[state]:
                 transitions_by_state[state][next_state] = []
             transitions_by_state[state][next_state].append(token_id)
+    
+    for final_state in dfa.finals:
+        if final_state not in transitions_by_state:
+            transitions_by_state[final_state] = {}
+        
+        if final_state not in transitions_by_state[final_state]:
+            transitions_by_state[final_state][final_state] = []
+        
+        transitions_by_state[final_state][final_state].append(tokenizer.eos_token_id)
+    
     
     max_tokens_transition = 0
     for state in transitions_by_state: 
@@ -332,12 +438,27 @@ def main():
     input_ids = tokenizer(prompt)['input_ids']
     input_ids = torch.tensor(input_ids).to(device).unsqueeze(0)
     
-    pattern = r'<<( )?(\(){0,3}( )?([a-z]|[0-9]{1,3})( )?(\)){0,3}(( )?([+\-]|\/\/|\/|%|\*|\*\*)( )?((\(){0,3}( )?)?([a-z]|[0-9]{1,3})( )?(\)){0,3})*( )?>>'
+    pattern = r'4[0-9]*'
+    #r'<<( )?(\(){0,3}( )?([a-z]|[0-9]{1,3})( )?(\)){0,3}(( )?([+\-]|\/\/|\/|%|\*|\*\*)( )?((\(){0,3}( )?)?([a-z]|[0-9]{1,3})( )?(\)){0,3})*( )?>>'
     
     transitions_by_state, initial_state, final_states, transition_matrix = run_pattern_test(pattern, tokenizer)
 
-    out = generate(model, input_ids, steps=2, gen_length=8, block_length=8, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=sorted(list(final_states)), transition_matrix=transition_matrix)
+    start_time = time.time()
+    out = generate(model, input_ids, steps=100, gen_length=8, block_length=8, temperature=0., cfg_scale=0., remasking='low_confidence')
+    end_time = time.time()
+    print(f"Unconstrained Time taken: {end_time - start_time:.4f} seconds")
+    print("Unconstrained output:")
     print(tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0])
+    
+    
+    
+    start_time = time.time()
+    out = generate_constrained(model, input_ids, steps=100, gen_length=8, block_length=8, temperature=0., cfg_scale=0., remasking='low_confidence', transitions_by_state=transitions_by_state, initial_state=initial_state, final_states=sorted(list(final_states)), transition_matrix=transition_matrix)
+    end_time = time.time()
+    print(f"Constrained Time taken: {end_time - start_time:.4f} seconds")
+    print("Constrained output:")
+    print(tokenizer.batch_decode(out[:, input_ids.shape[1]:], skip_special_tokens=True)[0])
+    
 
 
 if __name__ == '__main__':

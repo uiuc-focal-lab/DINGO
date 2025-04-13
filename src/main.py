@@ -71,7 +71,7 @@ def create_result_file(args):
 
 def process_dataset_interactive(args):
 
-    llm = BaseLM(args.model, args.device, device_map = 'auto', constraint_mode = args.constraint_mode, steps = args.steps, gen_length = args.gen_length,
+    llm = BaseLM(args.model,args.dataset, args.device, device_map = 'auto', constraint_mode = args.constraint_mode, steps = args.steps, gen_length = args.gen_length,
                  block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking)
     
 
@@ -162,7 +162,7 @@ def process_dataset_parallel(args):
     class PromptActor:
         def __init__(self):
             self.prompt_fn = BasePrompter(dataset = args.dataset, num_shots= args.num_shots)
-            self.llm = BaseLM(args.model, args.device, device_map = None, constraint_mode = args.constraint_mode, gen_length = args.gen_length,
+            self.llm = BaseLM(args.model, args.dataset, args.device, device_map = None, constraint_mode = args.constraint_mode, gen_length = args.gen_length,
                  block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking)
         
         def process_item(self, batch):

@@ -3,10 +3,12 @@ from transformers import AutoModel, AutoTokenizer
 from .llada import LLADA
 import os
 import time
-
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+from dfa import DFAMatrixStore
 
 class BaseLM:
-    def __init__(self, model_name, device, device_map = None, constraint_mode = 'original', steps = 128, gen_length = 128,
+    def __init__(self, model_name, task_name, device, device_map = None, constraint_mode = 'original', steps = 128, gen_length = 128,
                  block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence'):
         
         if device_map is None: 
@@ -25,8 +27,13 @@ class BaseLM:
             self.backend = 'LLADA'
         else:
             raise ValueError(f"Model {model_name} not supported")
+        
+        dfa_store = None
+        if constraint_mode == 'diffusion_constrained':
+            dfa_store = DFAMatrixStore(task_name)
+            dfa_store.build(self.tokenizer)
     
-        self.generator = eval(f'{self.backend}')(self.model, self.tokenizer, constraint_mode, steps, gen_length, block_length, temperature, cfg_scale, remasking)
+        self.generator = eval(f'{self.backend}')(self.model, self.tokenizer, constraint_mode, dfa_store, steps, gen_length, block_length, temperature, cfg_scale, remasking)
     
     
     def __call__(self, batch):
