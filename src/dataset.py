@@ -9,7 +9,7 @@ def load_dataset_by_name(task_name):
     if task_name == 'gsm_symbolic':
         data = []
         i = 0
-        folder_path = '/home/tarun/struct_cot/src/gsm_symbolic/' 
+        folder_path = 'gsm_symbolic/' 
         for filename in os.listdir(folder_path):
             if filename.endswith('.json'):
                 with open(os.path.join(folder_path, filename), 'r') as f:
