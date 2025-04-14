@@ -8,4 +8,5 @@
 __pycache__/
 *.DS_Store
 src/logging/
-
+**/__pycache__/
+*.pyc

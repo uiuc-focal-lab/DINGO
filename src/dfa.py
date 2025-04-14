@@ -41,11 +41,12 @@ def compute_token_transitions(tokenizer, fsm):
     states.update(fsm.finals)
     
     # For each token ID and each state, compute the next state
-    vocab = tokenizer.get_vocab()
-    for token_text, token_id in vocab.items():
-        # Convert token to bytes
-        token_bytes = token_text.encode('utf-8')
+    # vocab = tokenizer.get_vocab()
+    from syncode.mask_store.byte_tokenizer import ByteTokenizer
+    byte_tokenizer = ByteTokenizer(tokenizer)
+    vocab = byte_tokenizer.byte_vocab
         
+    for token_bytes, token_id in vocab.items():
         for state in states:
             # Start from the given state
             current = state

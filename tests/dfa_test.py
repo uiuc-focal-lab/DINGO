@@ -11,58 +11,6 @@ from dfa import compute_token_transitions
 class TokenTransitionsTest(unittest.TestCase):
     """Test class for computing token transitions with different patterns."""
     
-    def compute_token_transitions(self, tokenizer, fsm):
-        """
-        Compute the state transitions for each token in the tokenizer vocabulary and each state in the FSM.
-        
-        Args:
-            tokenizer: An LLM tokenizer from Hugging Face Transformers
-            fsm: A ByteFSM instance
-            
-        Returns:
-            A dictionary mapping (state, token_id) -> next_state, indicating the state reached 
-            when starting from 'state' and processing a token with ID 'token_id'.
-        """
-        # Initialize the transition map
-        token_transitions = {}
-        
-        # Get all states in the FSM
-        states = set()
-        
-        # Add states from transition dictionary keys
-        states.update(fsm.transitions.keys())
-        
-        # Add states from transition dictionary values
-        for transitions_dict in fsm.transitions.values():
-            for byte, next_state in transitions_dict.items():
-                if next_state is not None:
-                    states.add(next_state)
-        
-        # Add initial and final states
-        states.add(fsm.initial)
-        states.update(fsm.finals)
-        
-        # For each token ID and each state, compute the next state
-        vocab = tokenizer.get_vocab()
-        for token_text, token_id in vocab.items():
-            # Convert token to bytes
-            token_bytes = token_text.encode('utf-8')
-            
-            for state in states:
-                # Start from the given state
-                current = state
-                
-                # Process each byte of the token
-                for byte in token_bytes:
-                    current = fsm.get_next_state(current, byte)
-                    if current is None:
-                        break
-                
-                # Store the resulting state
-                token_transitions[(state, token_id)] = current
-        
-        return token_transitions, states
-    
     def run_pattern_test(self, pattern, tokenizer_name="Qwen/Qwen2.5-1.5B"):
         """
         Run a test with the given pattern and tokenizer.
@@ -86,7 +34,7 @@ class TokenTransitionsTest(unittest.TestCase):
         # Compute token transitions with timing
         print("Computing token transitions...")
         start_time = time.time()
-        token_transitions, states = self.compute_token_transitions(tokenizer, dfa)
+        token_transitions, states = compute_token_transitions(tokenizer, dfa)
         end_time = time.time()
         total_time = end_time - start_time
         
@@ -191,6 +139,17 @@ class TokenTransitionsTest(unittest.TestCase):
         pattern = r'\{"sku":"[A-Z0-9-]+","name":"[A-Za-z0-9 .,\-]+","price":[0-9]+\.[0-9]{2},"category":"[A-Za-z]+","inventory":[0-9]+,"attributes":\{"color":"[A-Za-z]+","size":"[A-Za-z0-9]+"}\}'
         return self.run_pattern_test(pattern)
 
+    def test_whitespace(self):
+        """Test with a pattern that matches whitespace characters."""
+        print("\n==== TESTING WHITESPACE PATTERN ====")
+        pattern = r" "
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B")
+        dfa = ByteFSM(pattern)
+        token_transitions, states = compute_token_transitions(tokenizer, dfa)
+        ws_token = tokenizer.encode(" ")[0]
+        assert token_transitions[(0, ws_token)] == 1
+
+
 if __name__ == "__main__":
     # Create a single test instance
     test = TokenTransitionsTest()
@@ -202,7 +161,8 @@ if __name__ == "__main__":
         # "test_product_name_pattern",
         # "test_user_json_schema",
         # "test_product_catalog_schema",
-        "test_gsm_symbolic"
+        # "test_gsm_symbolic",
+        "test_whitespace",
     ]
     
     results = []
