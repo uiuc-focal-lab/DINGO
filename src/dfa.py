@@ -146,7 +146,12 @@ class DFAMatrixStore:
             if final_state not in transitions_by_state[final_state]:
                 transitions_by_state[final_state][final_state] = []
             
-            transitions_by_state[final_state][final_state].append(tokenizer.eos_token_id)
+            eot_id = tokenizer.convert_tokens_to_ids('<|eot_id|>')
+            if eot_id not in transitions_by_state[final_state][final_state]:
+                 transitions_by_state[final_state][final_state].append(eot_id)
+            
+            if tokenizer.eos_token_id not in transitions_by_state[final_state][final_state]:
+                transitions_by_state[final_state][final_state].append(tokenizer.eos_token_id)
         
         
         max_tokens_transition = 0

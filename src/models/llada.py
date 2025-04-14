@@ -270,15 +270,6 @@ class LLADA:
 
                 x0 = torch.argmax(logits_with_noise, dim=-1)  
 
-                best_intermediate_state = torch.argmax(current_cost)
-                token_path = []
-                for t in range(vec_iter, global_vec_iter, -1):
-                    tok = selected_tokens[best_intermediate_state, t].item()  
-                    token_path.append(tok)
-                    best_intermediate_state = selected_sources[best_intermediate_state, t] 
-                token_path.reverse()
-                x0[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
-
                 if self.remasking == 'low_confidence':
                     p = F.softmax(logits.to(torch.float64), dim=-1)
                     x0_p = torch.squeeze(
@@ -299,24 +290,40 @@ class LLADA:
                     transfer_index[j, select_index] = True
                 x[transfer_index] = x0[transfer_index]
 
+                if i == self.steps - 1:
+                    if num_block == num_blocks - 1:
+                        best_intermediate_state = self.dfa_store.final_states[torch.argmax(current_cost[self.dfa_store.final_states])]
+                    else:
+                        best_intermediate_state = torch.argmax(current_cost)
+
+                    token_path = []
+                    for t in range(vec_iter, global_vec_iter, -1):
+                        tok = selected_tokens[best_intermediate_state, t].item()  
+                        # if tok != 126081:
+                        #     import pdb; pdb.set_trace()
+                        token_path.append(tok)
+                        best_intermediate_state = selected_sources[best_intermediate_state, t] 
+                    token_path.reverse()
+                    x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
+
             global_vec_iter = vec_iter
             cost_vector = current_cost
-        final_time = global_vec_iter
-        final_costs = cost_vector[self.dfa_store.final_states] 
-        best_final_index = torch.argmax(final_costs)
-        best_state = self.dfa_store.final_states[best_final_index]
-        best_cost  = final_costs[best_final_index]
+        # final_time = global_vec_iter
+        # final_costs = cost_vector[self.dfa_store.final_states] 
+        # best_final_index = torch.argmax(final_costs)
+        # best_state = self.dfa_store.final_states[best_final_index]
+        # best_cost  = final_costs[best_final_index]
 
-        token_path = []
-        curr_state = best_state
+        # token_path = []
+        # curr_state = best_state
 
-        for t in range(final_time, 0, -1):
-            tok = selected_tokens[curr_state, t].item()  
-            token_path.append(tok)
-            curr_state = selected_sources[curr_state, t] 
+        # for t in range(final_time, 0, -1):
+        #     tok = selected_tokens[curr_state, t].item()  
+        #     token_path.append(tok)
+        #     curr_state = selected_sources[curr_state, t] 
 
-        token_path.reverse()
+        # token_path.reverse()
 
-        x[:, prompt.shape[1]:] = torch.tensor(token_path, dtype=torch.long, device=x.device)
+        # x[:, prompt.shape[1]:] = torch.tensor(token_path, dtype=torch.long, device=x.device)
 
         return x
