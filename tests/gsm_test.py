@@ -11,7 +11,7 @@ class GSMSymbolicTest(unittest.TestCase):
         super().__init__(*args, **kwargs)
         self.pattern = r'<<( )?(\(){0,3}( )?([a-z]|[0-9]{1,3})( )?(\)){0,3}(( )?([+\-]|\/\/|\/|%|\*|\*\*)( )?((\(){0,3}( )?)?([a-z]|[0-9]{1,3})( )?(\)){0,3})*( )?>>'
         self.compiled_pattern = re.compile(self.pattern)
-        self.folder_path = '/home/tarun/struct_cot/src/gsm_symbolic/'
+        self.folder_path = 'src/gsm_symbolic/'
     
     def process_json_files(self) -> List[str]:
         """
