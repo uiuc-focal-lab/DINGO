@@ -98,10 +98,6 @@ class DFAMatrixStore:
         return success
     
     def build(self, tokenizer):
-        if self.load():
-            return
-        
-        
         regex_path = f'regex_folder/{self.task_name}.text'
         if os.path.exists(regex_path):
             with open(regex_path, 'r') as f:
@@ -162,12 +158,9 @@ class DFAMatrixStore:
         
 
         transition_matrix = build_transition_matrix(transitions_by_state, max_tokens_transition)
-
         self.initial_state = dfa.initial
         self.final_states = sorted(list(dfa.finals))
         self.transition_matrix = transition_matrix
-        
-        self.save()
 
     
     def save(self):
