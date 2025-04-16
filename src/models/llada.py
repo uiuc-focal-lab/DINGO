@@ -56,20 +56,29 @@ class LLADA:
         self.mask_id = 126336
         self.dfa_store = dfa_store
         self.constrain_at = constrain_at
-        self.setup_vectorized()
+        if self.dfa_store is not None:
+            self._build_sparse_edges()
     
-    def setup_vectorized(self):
-        if self.dfa_store is None: 
-            return
-        
-        clamped_indices = self.dfa_store.transition_matrix.clamp(min=0)
-        self.clamped_indices_4d = clamped_indices.unsqueeze(0).expand(
-            self.block_length, -1, -1, -1
-        ).to(self.model.device)
+    def _build_sparse_edges(self):
+        """Convert self.dfa_store.transition_matrix (shape [S,S,max_toks], -1 means invalid)
+        into three 1‑D tensors edge_src, edge_dst, edge_tok that enumerate **only**
+        valid transitions. Saves both memory and compute later.
+        """
+        tm = self.dfa_store.transition_matrix  # [S, S, max_tok]
+        src, dst, tok = [], [], []
 
-        self.valid_mask_4d = (self.dfa_store.transition_matrix >= 0).unsqueeze(0).expand(
-            self.block_length, -1, -1, -1,
-        ).to(self.model.device)
+        # find all valid (q,q',token) triples
+        valid = (tm >= 0).nonzero(as_tuple=False)   # [E, 3] (q, q', k)
+        edge_src = valid[:, 0]
+        edge_dst = valid[:, 1]
+        tok_idx  = valid[:, 2]
+        edge_tok = tm[edge_src, edge_dst, tok_idx]
+
+        self.edge_src = edge_src.to(self.model.device)
+        self.edge_dst = edge_dst.to(self.model.device)
+        self.edge_tok = edge_tok.to(self.model.device)
+        self.num_states = tm.shape[0]
+        self.num_edges  = self.edge_src.numel()
         
 
     def __call__(self, prompt):
@@ -191,12 +200,6 @@ class LLADA:
         cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
         cost_vector[self.dfa_store.initial_state] = 0.0
 
-        selected_tokens = torch.full((num_states, self.gen_length + 1),
-                                    -1, device=x.device, dtype=torch.long)
-
-        selected_sources = torch.full((num_states, self.gen_length + 1),
-                                    -1, device=x.device, dtype=torch.long)
-
         global_vec_iter = 0
 
         for num_block in range(num_blocks):
@@ -221,52 +224,38 @@ class LLADA:
 
                 gen_logits = logits_with_noise[:, start_gen_idx:end_gen_idx, :] 
                 
+                selected_tokens = []
+                selected_sources = []
                 
                 if i >= self.constrain_at:
                     current_cost = cost_vector.clone()
-                    vec_iter = global_vec_iter
+                    vec_iter = global_vec_iter + self.block_length
                 
                     gen_log_probs = F.log_softmax(gen_logits, dim=-1)[0]
-
-                    gen_log_probs = gen_log_probs.unsqueeze(1).unsqueeze(2)  # => [block_length, 1, 1, vocab_size]
-                    gen_log_probs = gen_log_probs.expand(-1, num_states, num_states, -1)
-
-                    gathered_log_probs = torch.gather(
-                        gen_log_probs, 
-                        dim=3,
-                        index=self.clamped_indices_4d
-                    )
-
-                    gathered_log_probs = gathered_log_probs.masked_fill(~self.valid_mask_4d, float('-inf'))
-
-
-                    max_log_probs, best_tokens_idx = gathered_log_probs.max(dim=3)
                     
-                    best_tokens = torch.gather(
-                        self.clamped_indices_4d, dim=3, index=best_tokens_idx.unsqueeze(3)
-                    ).squeeze(3)
 
                     for pos in range(self.block_length):
-                        # max_log_probs[pos] => shape [num_states, num_states]
-                        # best_tokens[pos]   => shape [num_states, num_states]
+                        tok_log = gen_log_probs[pos]
+                        edge_score = current_cost[self.edge_src] + tok_log[self.edge_tok]
+                        
+                        # scatter‑max: next_cost[q'] = max_{edges src->q'} edge_score
+                        next_cost = torch.full_like(current_cost, -float('inf'))
+                        next_cost.scatter_reduce_(0, self.edge_dst, edge_score, reduce='amax')
 
-                        # Weighted log-probs = cost(q) + max_log_probs[pos,q,q']
-                        weighted_log_probs = max_log_probs[pos] + current_cost.unsqueeze(1)
-                        # shape => [num_states, num_states]
+                        # grab the winning edge per dst state (for back‑pointer)
+                        mask = next_cost[self.edge_dst] == edge_score          # [E]
+                        chosen_edges = mask.nonzero(as_tuple=False).squeeze(1)
 
-                        # next_cost[q'] = max over q
-                        max_values, max_indices = torch.max(weighted_log_probs, dim=0)
-                        next_cost = max_values  # shape [num_states]
+                        next_tok  = torch.full_like(current_cost, -1, dtype=torch.long)
+                        next_src  = torch.full_like(current_cost, -1, dtype=torch.long)
+                        if chosen_edges.numel():
+                            next_tok[self.edge_dst[chosen_edges]] = self.edge_tok[chosen_edges]
+                            next_src[self.edge_dst[chosen_edges]] = self.edge_src[chosen_edges]
 
-                        # record back-pointer
-                        for q_prime in range(num_states):
-                            if next_cost[q_prime] != float('-inf'):
-                                best_source = max_indices[q_prime]
-                                selected_tokens[q_prime, vec_iter+1] = best_tokens[pos, best_source, q_prime]
-                                selected_sources[q_prime, vec_iter+1] = best_source
+                        selected_tokens.append(next_tok)
+                        selected_sources.append(next_src)
 
                         current_cost = next_cost
-                        vec_iter += 1
 
                 x0 = torch.argmax(logits_with_noise, dim=-1)  
 
@@ -297,12 +286,10 @@ class LLADA:
                         best_intermediate_state = torch.argmax(current_cost)
 
                     token_path = []
-                    for t in range(vec_iter, global_vec_iter, -1):
-                        tok = selected_tokens[best_intermediate_state, t].item()  
-                        # if tok != 126081:
-                        #     import pdb; pdb.set_trace()
+                    for t in range(vec_iter - 1, global_vec_iter - 1, -1):
+                        tok = selected_tokens[t][best_intermediate_state].item()  
                         token_path.append(tok)
-                        best_intermediate_state = selected_sources[best_intermediate_state, t] 
+                        best_intermediate_state = selected_sources[t][best_intermediate_state].item() 
                     token_path.reverse()
                     x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
 
