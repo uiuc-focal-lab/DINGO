@@ -10,3 +10,4 @@ __pycache__/
 src/logging/
 **/__pycache__/
 *.pyc
+src/rust_dfa/target/
