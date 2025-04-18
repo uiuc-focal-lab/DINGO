@@ -3,7 +3,7 @@ import re
 import time
 import unittest
 from syncode.larkm import Lark
-from validators.grammar_to_regex import lark_to_regex
+from grammar_to_regex import lark_to_regex
 import rust_dfa
 
 
@@ -46,7 +46,7 @@ class GSMSymbolicRegex:
     def grammar_regex():
         """Define a Lark grammar that represents the same pattern as the direct regex"""
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        grammar_path = f"{current_dir}/grammar_folder/gsm_symbolic_simpl.lark"
+        grammar_path = f"{current_dir}/gsm_symbolic_simpl.lark"
         with open(grammar_path, 'r') as file:
             grammar_string = file.read()
         return grammar_string
