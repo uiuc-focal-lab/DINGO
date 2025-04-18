@@ -1,107 +1,186 @@
 import re
+import time
+import unittest
 from syncode.larkm import Lark
 from validators.grammar_to_regex import lark_to_regex
 import rust_dfa
 
-# Approach 1: Direct Regex Construction
-def build_regex_direct():
-    # Define the operator subpattern for convenience
-    op = r'(?:[+\-]|\/\/|\/|%|\*|\*\*)'
-    
-    # E0: expression with zero parentheses
-    #     operand = single letter OR up to 3 digits
-    #     then zero or more [ operator + operand ]
-    E0 = (
-        r'(?:[a-z]|[0-9]{1,3})'
-        r'(?:( )?' + op + r'( )?(?:[a-z]|[0-9]{1,3}))*'
-    )
-    
-    # E1: expression allowing parentheses at depth 1
-    #     operand = a letter OR digits OR ( E0 )
-    E1 = (
-        r'(?:[a-z]|[0-9]{1,3}|\(' + E0 + r'\))'
-        r'(?:( )?' + op + r'( )?(?:[a-z]|[0-9]{1,3}|\(' + E0 + r'\)))*'
-    )
-    
-    # E2: expression allowing up to depth 2
-    #     operand = a letter OR digits OR ( E1 )
-    E2 = (
-        r'(?:[a-z]|[0-9]{1,3}|\(' + E1 + r'\))'
-        r'(?:( )?' + op + r'( )?(?:[a-z]|[0-9]{1,3}|\(' + E1 + r'\)))*'
-    )
-    
-    # E3: expression allowing up to depth 3
-    #     operand = a letter OR digits OR ( E2 )
-    E3 = (
-        r'(?:[a-z]|[0-9]{1,3}|\(' + E2 + r'\))'
-        r'(?:( )?' + op + r'( )?(?:[a-z]|[0-9]{1,3}|\(' + E2 + r'\)))*'
-    )
-    
-    pattern_str = r'<<( )?' + E3 + r'( )?>>'
-    cot = r'(' + r"([0-9]|[A-z]|[a-z]|,|\.|( )|{|}|\$|%|\'|\:)*" + pattern_str + r')+\.'
-    
-    return re.compile(cot)
 
-# Definition of Lark grammar for the expression pattern
-def define_lark_grammar():
-    """Define a Lark grammar that represents the same pattern as the direct regex"""
-    grammar = r"""
-    start: cot
+class GSMSymbolicRegex:
+    """Class to handle expression matching using both regex approaches"""
     
-    cot: (char | delim_expr)+ "."
+    @staticmethod
+    def build_regex_old():
+        """Build a regex pattern using the direct nested approach"""
+        # Define the operator subpattern for convenience
+        op = r'(?:[+\-]|\/\/|\/|%|\*|\*\*)'
+        
+        # Build expressions of increasing nesting depth
+        E0 = (
+            r'(?:[a-z]|[0-9]{1,3})'
+            r'(?:( )?' + op + r'( )?(?:[a-z]|[0-9]{1,3}))*'
+        )
+        
+        E1 = (
+            r'(?:[a-z]|[0-9]{1,3}|\(' + E0 + r'\))'
+            r'(?:( )?' + op + r'( )?(?:[a-z]|[0-9]{1,3}|\(' + E0 + r'\)))*'
+        )
+        
+        E2 = (
+            r'(?:[a-z]|[0-9]{1,3}|\(' + E1 + r'\))'
+            r'(?:( )?' + op + r'( )?(?:[a-z]|[0-9]{1,3}|\(' + E1 + r'\)))*'
+        )
+        
+        E3 = (
+            r'(?:[a-z]|[0-9]{1,3}|\(' + E2 + r'\))'
+            r'(?:( )?' + op + r'( )?(?:[a-z]|[0-9]{1,3}|\(' + E2 + r'\)))*'
+        )
+        
+        pattern_str = r'<<( )?' + E3 + r'( )?>>'
+        cot = r'(' + r"([0-9]|[A-z]|[a-z]|,|\.|( )|{|}|\$|%|\'|\:)*" + pattern_str + r')+\.'
+        
+        return re.compile(cot)
     
-    delim_expr: "<<" space? expr space? ">>"
-    
-    expr: e3
-    
-    e3: operand3 (space? operator space? operand3)*
-    e2: operand2 (space? operator space? operand2)*
-    e1: operand1 (space? operator space? operand1)*
-    e0: operand0 (space? operator space? operand0)*
-    
-    operand3: letter | number | "(" e2 ")"
-    operand2: letter | number | "(" e1 ")"
-    operand1: letter | number | "(" e0 ")"
-    operand0: letter | number
-    
-    operator: "+" | "-" | "//" | "/" | "%" | "*" | "**"
-    
-    letter: /[a-z]/
-    number: /[0-9]{1,3}/
-    char: /[0-9A-Za-z,.\$%': {}]/
-    
-    space: " "
-    """
-    return grammar
+    @staticmethod
+    def define_lark_grammar():
+        """Define a Lark grammar that represents the same pattern as the direct regex"""
+        grammar = r"""
+        start: cot
+        
+        cot: (char | delim_expr)+ "."
+        
+        delim_expr: "<<" space? expr space? ">>"
+        
+        expr: e3
+        
+        e3: operand3 (space? operator space? operand3)*
+        e2: operand2 (space? operator space? operand2)*
+        e1: operand1 (space? operator space? operand1)*
+        e0: operand0 (space? operator space? operand0)*
+        
+        operand3: letter | number | "(" e2 ")"
+        operand2: letter | number | "(" e1 ")"
+        operand1: letter | number | "(" e0 ")"
+        operand0: letter | number
+        
+        operator: "+" | "-" | "//" | "/" | "%" | "*" | "**"
+        
+        letter: /[a-z]/
+        number: /[0-9]{1,3}/
+        char: /[0-9A-Za-z,.\$%': {}]/
+        
+        space: " "
+        """
+        return grammar
 
-# Test both approaches
-def test_regex_patterns():
-    # Create patterns using both approaches
-    direct_pattern = build_regex_direct()
-    
-    # For the Lark approach, we're assuming the grammar string is passed to the existing lark_to_regex function
-    lark_grammar = define_lark_grammar()
-    lark_pattern = lark_to_regex(lark_grammar)
-    
-    print("Direct Regex Pattern:")
-    print(direct_pattern.pattern)
-    print("Lark Regex Pattern:")
-    print(lark_pattern['start'])
 
+class RegexTest(unittest.TestCase):
+    """Test cases for expression regex matching"""
+    
+    # These will be set from main() before tests run
+    direct_pattern = None
+    lark_pattern = None
+    dfa = None
+    
+    @classmethod
+    def setUpClass(cls):
+        # Test data
+        cls.test_cases = [
+            # Should match (True)
+            "Let's think step by step: <<a+2*x>>.",
+            "Let's think step by step. We know there are {b} girls in the {s1}. We also know there are {a} the number of boys in the {s1}. To find the total number of kids in the {s1}, we need to add the number of girls and the number of boys. Since the number of boys is {a} times the number of girls, the number of boys is <<a * b>>. Therefore, the total number of kids in the {s1} is <<b + a * b>>. The final answer is <<b + a * b>>.",
+            # Should not match (False)
+            "Let's think step by step: <<a+2x>> this one has issue.",
+            "Let's think step by step: <<a+2*x = 3*2>> this one has issue."
+        ]
+    
+    def test_direct_regex(self):
+        """Test the direct regex approach"""
+        results = []
+        match_times = []
+        
+        for test_str in self.test_cases:
+            start_time = time.time()
+            match = bool(self.direct_pattern.search(test_str))
+            match_time = time.time() - start_time
+            match_times.append(match_time)
+            results.append(match)
+        
+        # First two should match, last two should not
+        self.assertTrue(results[0], f"Failed on case 0: {self.test_cases[0]}")
+        self.assertTrue(results[1], f"Failed on case 1: {self.test_cases[1]}")
+        self.assertFalse(results[2], f"Failed on case 2: {self.test_cases[2]}")
+        self.assertFalse(results[3], f"Failed on case 3: {self.test_cases[3]}")
+        
+        print(f"\nDirect Regex Match Times: {[f'{t*1000:.2f}ms' for t in match_times]}")
+    
+    def test_dfa_regex(self):
+        """Test the Lark-based DFA approach"""
+        results = []
+        match_times = []
+        
+        for test_str in self.test_cases:
+            start_time = time.time()
+            match = self.dfa.matches(test_str)
+            match_time = time.time() - start_time
+            match_times.append(match_time)
+            results.append(match)
+        
+        # First two should match, last two should not
+        self.assertTrue(results[0], f"Failed on case 0: {self.test_cases[0]}")
+        self.assertTrue(results[1], f"Failed on case 1: {self.test_cases[1]}")
+        self.assertFalse(results[2], f"Failed on case 2: {self.test_cases[2]}")
+        self.assertFalse(results[3], f"Failed on case 3: {self.test_cases[3]}")
+        
+        print(f"\nDFA Match Times: {[f'{t*1000:.2f}ms' for t in match_times]}")
+
+
+def main():
+    # Create timing variables first
+    direct_compile_time = 0
+    lark_compile_time = 0
+    dfa_init_time = 0
+    dfa_size = 0
+    
+    # Measure direct regex compilation time
+    start_time = time.time()
+    direct_pattern = GSMSymbolicRegex.build_regex_old()
+    direct_compile_time = time.time() - start_time
+    
+    # Measure Lark grammar to regex compilation time
+    start_time = time.time()
+    lark_grammar = GSMSymbolicRegex.define_lark_grammar()
+    lark_pattern_dict = lark_to_regex(lark_grammar)
+    lark_pattern = lark_pattern_dict['start']
+    lark_compile_time = time.time() - start_time
+    
+    # Measure DFA initialization time
     dfa = rust_dfa.RegexDFA()
-    size = dfa.initialize(lark_pattern['start'])
-    print(f"DFA size: {size}")
-
-    # Define test cases
-    tests = [
-        "Let's think step by step: <<a+2*x>>.",
-        "Let's think step by step. We know there are {b} girls in the {s1}. We also know there are {a} the number of boys in the {s1}. To find the total number of kids in the {s1}, we need to add the number of girls and the number of boys. Since the number of boys is {a} times the number of girls, the number of boys is <<{a}*{b}>>. Therefore, the total number of kids in the {s1} is <<{b}+{a}*{b}>>. The final answer is <<{b}+{a}*{b}>>."
-    ]
+    start_time = time.time()
+    dfa_size = dfa.initialize(lark_pattern)
+    dfa_init_time = time.time() - start_time
     
-    out = dfa.matches(tests[0])
-    print(out)
-    out = dfa.matches(tests[1])
-    print(out)
+    # Print compilation time comparison
+    print("\n===== REGEX PATTERN COMPILATION BENCHMARKS =====")
+    print(f"Direct Regex Compilation Time: {direct_compile_time*1000:.2f}ms")
+    print(f"Lark Grammar to Regex Compilation Time: {lark_compile_time*1000:.2f}ms")
+    print(f"DFA Initialization Time: {dfa_init_time*1000:.2f}ms")
+    print(f"DFA Size: {dfa_size} bytes (approx.)")
+    
+    # Print pattern information
+    print("\n===== REGEX PATTERNS =====")
+    print(f"Direct Regex Pattern Length: {len(direct_pattern.pattern)} characters")
+    print(f"Lark-derived Regex Pattern Length: {len(lark_pattern)} characters")
+    
+    # Now initialize the test class with the patterns
+    RegexTest.direct_pattern = direct_pattern
+    RegexTest.lark_pattern = lark_pattern
+    RegexTest.dfa = dfa
+    
+    # Run tests
+    print("\n===== RUNNING TESTS =====")
+    unittest.main(argv=['first-arg-is-ignored'], exit=False)
+
 
 if __name__ == "__main__":
-    test_regex_patterns()
+    main()
