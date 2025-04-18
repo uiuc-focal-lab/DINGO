@@ -35,14 +35,16 @@ impl RegexDFA {
         
         // print the regex and the size of the DFA
         println!("Regex: {}", regex_str);
-        println!("DFA size: {}", dfa.memory_usage());
 
         self.size = dfa.memory_usage();
         
         // Store the DFA
         self.dfa = Some(dfa);
         
-        Ok(self.size)
+        let cnt_states = self.count_reachable_states()?;
+        println!("Reachable states: {}", cnt_states);
+
+        Ok(cnt_states)
     }
     
     fn get_size(&self) -> usize {
@@ -108,6 +110,55 @@ impl RegexDFA {
         
         // Return whether it's a match state
         Ok(dfa.is_match_state(eoi_state))
+    }
+
+    fn count_reachable_states(&self) -> PyResult<usize> {
+        // Ensure DFA is initialized
+        let dfa = match &self.dfa {
+            Some(dfa) => dfa,
+            None => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "DFA not initialized. Call initialize() first."
+            ))
+        };
+        
+        // Start from the initial state
+        let config = start::Config::new();
+        let start_state = match dfa.start_state(&config) {
+            Ok(state) => state,
+            Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Failed to get start state: {}", e)
+            ))
+        };
+        
+        // Use BFS to traverse the DFA
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+        
+        // Add the start state to the queue
+        queue.push_back(start_state);
+        visited.insert(start_state.as_usize());
+        
+        // Process all reachable states
+        while let Some(current_state) = queue.pop_front() {
+            // For each possible input byte (0-255)
+            for byte in 0..=255u8 {
+                let next_state = dfa.next_state(current_state, byte);
+                
+                // Skip dead states
+                if dfa.is_dead_state(next_state) {
+                    continue;
+                }
+                
+                // If we haven't visited this state yet
+                if visited.insert(next_state.as_usize()) {
+                    queue.push_back(next_state);
+                }
+            }
+        }
+        
+        // Return the count of reachable states
+        println!("All reachable states: {:?}", visited);
+        Ok(visited.len())
     }
 }
 

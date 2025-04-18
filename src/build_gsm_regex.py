@@ -165,7 +165,7 @@ def main():
     print(f"Direct Regex Compilation Time: {direct_compile_time*1000:.2f}ms")
     print(f"Lark Grammar to Regex Compilation Time: {lark_compile_time*1000:.2f}ms")
     print(f"DFA Initialization Time: {dfa_init_time*1000:.2f}ms")
-    print(f"DFA Size: {dfa_size} bytes (approx.)")
+    print(f"DFA Size: {dfa_size}")
     
     # Print pattern information
     print("\n===== REGEX PATTERNS =====")
