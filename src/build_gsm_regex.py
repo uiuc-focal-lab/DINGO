@@ -1,3 +1,4 @@
+import os
 import re
 import time
 import unittest
@@ -44,34 +45,11 @@ class GSMSymbolicRegex:
     @staticmethod
     def define_lark_grammar():
         """Define a Lark grammar that represents the same pattern as the direct regex"""
-        grammar = r"""
-        start: cot
-        
-        cot: (char | delim_expr)+ "."
-        
-        delim_expr: "<<" space? expr space? ">>"
-        
-        expr: e3
-        
-        e3: operand3 (space? operator space? operand3)*
-        e2: operand2 (space? operator space? operand2)*
-        e1: operand1 (space? operator space? operand1)*
-        e0: operand0 (space? operator space? operand0)*
-        
-        operand3: letter | number | "(" e2 ")"
-        operand2: letter | number | "(" e1 ")"
-        operand1: letter | number | "(" e0 ")"
-        operand0: letter | number
-        
-        operator: "+" | "-" | "//" | "/" | "%" | "*" | "**"
-        
-        letter: /[a-z]/
-        number: /[0-9]{1,3}/
-        char: /[0-9A-Za-z,.\$%': {}]/
-        
-        space: " "
-        """
-        return grammar
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        grammar_path = f"{current_dir}/grammar_folder/gsm_symbolic_simpl.lark"
+        with open(grammar_path, 'r') as file:
+            grammar_string = file.read()
+        return grammar_string
 
 
 class RegexTest(unittest.TestCase):
