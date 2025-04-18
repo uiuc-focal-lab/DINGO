@@ -19,7 +19,7 @@ class LarkToRegexConverter:
     
     def __init__(self):
         self.rule_dict: Dict[str, str] = {}
-        self.max_replacement_depth = 10  # Limit recursion depth for safety
+        self.max_replacement_depth = 100  # Limit recursion depth for safety
     
     def convert(self, grammar_text: str) -> Dict[str, str]:
         """
@@ -336,13 +336,10 @@ class LarkToRegexConverter:
                         # Replace only this reference in this iteration
                         replacement = f"(?:{self.rule_dict[ref_name]})"
                         
-                        # Memory-efficient replacement (process in chunks if needed)
-                        pattern = self._safe_replace(pattern, placeholder, replacement)
+                        pattern = pattern.replace(placeholder, replacement)
                         modified = True
                         unresolved = True
                         
-                        # Stop after one replacement per rule per iteration to reduce memory usage
-                        break
                 
                 if modified:
                     self.rule_dict[rule_name] = pattern
@@ -353,24 +350,6 @@ class LarkToRegexConverter:
                 placeholder = f"__RULE_REF_{ref_name}__"
                 if placeholder in pattern:
                     raise ValueError(f"Could not resolve all rule references after {max_iterations} iterations. The grammar might be too complex or recursive.")
-    
-    def _safe_replace(self, text, old, new, chunk_size=1000):
-        """Replace occurrences of 'old' with 'new' in a memory-efficient way."""
-        # For small strings, just use the built-in replace
-        if len(text) < chunk_size:
-            return text.replace(old, new)
-        
-        # For larger strings, process in chunks
-        result = []
-        i = 0
-        while i < len(text):
-            chunk = text[i:i+chunk_size]
-            # Process this chunk
-            chunk = chunk.replace(old, new)
-            result.append(chunk)
-            i += chunk_size
-        
-        return ''.join(result)
 
 
 def lark_to_regex(grammar_text: str, start_rule: Optional[str] = None) -> Union[Dict[str, str], str]:
