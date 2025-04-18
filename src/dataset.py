@@ -16,10 +16,18 @@ def load_dataset_by_name(task_name):
                     json_data = json.load(f)
                     
                     current_vars = sorted(json_data['variable_types']) 
-                    new_vars = [chr(ord('a') + i) for i in range(len(current_vars))]
-                    var_map = {current_vars[i]: new_vars[i] for i in range(len(current_vars))}
-                    new_variable_types = {new_var : json_data['variable_types'][old_var] for old_var, new_var in var_map.items()}
-                    
+                    i, j = 0, 1
+                    var_map = {}
+                    new_variable_types = {}
+                    for var in current_vars: 
+                        if json_data['variable_types'][var] == 'str':
+                            var_map[var] = f's{j}'
+                            j += 1
+                        else:
+                            var_map[var] = chr(ord('a') + i)
+                            i += 1
+                        
+                        new_variable_types[var_map[var]] = json_data['variable_types'][var]
                     question, answer = json_data['question_parsed'], json_data['answer_parsed']
                     for old_var, new_var in var_map.items():
                         question = question.replace("{" + old_var + "}", "{" + new_var + "}")

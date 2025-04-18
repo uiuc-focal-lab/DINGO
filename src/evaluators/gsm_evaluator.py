@@ -7,20 +7,24 @@ from copy import deepcopy
 import signal
 
 class GSMSymbolicEvaluator(BaseEvaluator):
+    def __init__(self, dataset, do_cot = False):
+        super().__init__(dataset, do_cot)
+        self.pattern = re.compile(r'^<<( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\)))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\)))*\)))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\)))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\)))*\)))*\)))*( )?>>$')
+    
     def parse_completion_regex(self, response):
         try:
             return response[response.rfind('<<') : response.rfind('>>') + 2]
         except:
             return None  
-    
-    def seperate_reasoning_answer(self, response):
-        try:
-            return response[:response.rfind('<<')].strip(), None
-        except:
-            return response, None
-    
+
     def evaluate_answer(self, gen_output):
-        completion = gen_output['llm_response']
+        if self.do_cot:
+            completion = self.parse_completion_regex(gen_output['llm_response'])
+        else:
+            completion = gen_output['llm_response']
+        
+        parses = self.pattern.match(completion) if completion is not None else None
+        parses = parses is not None
         correct = False
         if completion is not None:
             completion = completion.strip()
@@ -32,6 +36,7 @@ class GSMSymbolicEvaluator(BaseEvaluator):
             'question': gen_output['question'],
             'gold_answer': gen_output['answer'],
             'correct': correct,
+            'parses': parses,
             'llm_response': gen_output['llm_response'],
             'parsed_completion': completion, 
             'time': gen_output['response_info']['time'], 

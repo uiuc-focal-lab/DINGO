@@ -5,7 +5,7 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 from models import *
-
+from validators import get_validator
 from evaluators import get_evaluator
 from pathlib import Path
 import atexit
@@ -34,9 +34,9 @@ def parse_arguments():
 
     #CoT args
     parser.add_argument('--model', type=str, help='Model name, e.g., "gpt-3.5-turbo" or "gemini-1.0-pro"')
-    parser.add_argument('--device', type = str, default= 'cuda:1', help = 'Device for Model')
     parser.add_argument('--constraint_mode', type = str, default= 'unconstrained', help = 'Generation mode', choices = ['unconstrained', 'diffusion_constrained', 'ar_constrained'])
     parser.add_argument('--num_shots', type=int, default=8, help='number of few shots')
+    parser.add_argument('--do_cot', type=bool, default=False, help='use COT')
     
 
     # general generation args
@@ -46,6 +46,8 @@ def parse_arguments():
     parser.add_argument('--temperature', type=float, default=0.0, help='sampling temperature')
     parser.add_argument('--cfg_scale', type=float, default=0.0, help='cfg scale for diffusion')
     parser.add_argument('--remasking', type=str, default='low_confidence', help='remasking strategy')
+    parser.add_argument('--constrain_at', type=int, default=None, help='constrain at step')
+    parser.add_argument('--enable_oppurtunistic', type=bool, default=True, help='enable oppurtunistic constrained decoding')
 
     #Distributed inference args
     parser.add_argument('--enable_dist', type=bool, default=False, help='enable distributed inference')
@@ -61,18 +63,22 @@ def set_default(obj):
 
 def create_result_file(args):
 
-    file_id = f"step={args.steps}_gen_length={args.gen_length}_block_length={args.block_length}_temperature={args.temperature}_cfg_scale={args.cfg_scale}_remasking={args.remasking}"
+    file_id = f"step={args.steps}_gen_length={args.gen_length}_block_length={args.block_length}_temperature={args.temperature}_cfg_scale={args.cfg_scale}_remasking={args.remasking}_constrain_at={args.constrain_at}"
     
-    result_file = f"{args.log_dir}/{args.dataset}/{args.model.split('/')[-1]}/{args.constraint_mode}/{args.num_shots}-shot/{file_id}.jsonl"
+    result_file = f"{args.log_dir}/{args.dataset}/{args.model.split('/')[-1]}/{args.constraint_mode}/cot={args.do_cot}/{args.num_shots}-shot/{file_id}.jsonl"
     Path(result_file).parent.mkdir(parents=True, exist_ok=True)
     return result_file
 
 
 
 def process_dataset_interactive(args):
+    if args.constraint_mode == 'diffusion_constrained':
+        assert args.constrain_at is not None
+    
+    validator = get_validator(args.dataset) if args.enable_oppurtunistic and args.constraint_mode == 'diffusion_constrained' else None
 
-    llm = BaseLM(args.model,args.dataset, args.device, device_map = 'auto', constraint_mode = args.constraint_mode, steps = args.steps, gen_length = args.gen_length,
-                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking)
+    llm = BaseLM(args.model,args.dataset, 'cuda', args.do_cot, device_map = 'auto', constraint_mode = args.constraint_mode, steps = args.steps, gen_length = args.gen_length,
+                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, validator = validator)
     
 
     dataset = load_dataset_by_name(args.dataset)
@@ -97,9 +103,9 @@ def process_dataset_interactive(args):
                 results.append(data['correct'])
 
 
-    prompt_fn = BasePrompter(dataset = args.dataset, num_shots= args.num_shots)
+    prompt_fn = BasePrompter(dataset = args.dataset, num_shots= args.num_shots, do_cot = args.do_cot)
 
-    parse_fn = get_evaluator(args.dataset)(args.dataset)
+    parse_fn = get_evaluator(args.dataset)(args.dataset, do_cot = args.do_cot)
     
     chat_mode = 'instruct' in args.model or 'Instruct' in args.model or 'it' in args.model or 'chat' in args.model
     
@@ -134,7 +140,11 @@ def process_dataset_parallel(args):
     if not ray.is_initialized():
         ray.init()
     
-    args.device = 'cuda'
+
+    if args.constraint_mode == 'diffusion_constrained':
+        assert args.constrain_at is not None
+    
+    validator = get_validator(args.dataset) if args.enable_oppurtunistic and args.constraint_mode == 'diffusion_constrained' else None
 
     dataset =  load_dataset_by_name(args.dataset)
     if args.end_idx == -1:
@@ -161,9 +171,9 @@ def process_dataset_parallel(args):
     @ray.remote(num_gpus=1/args.num_workers_per_gpu)
     class PromptActor:
         def __init__(self):
-            self.prompt_fn = BasePrompter(dataset = args.dataset, num_shots= args.num_shots)
-            self.llm = BaseLM(args.model, args.dataset, args.device, device_map = None, constraint_mode = args.constraint_mode, gen_length = args.gen_length,
-                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking)
+            self.prompt_fn = BasePrompter(dataset = args.dataset, num_shots= args.num_shots, do_cot = args.do_cot)
+            self.llm = BaseLM(args.model, args.dataset, 'cuda', args.do_cot, device_map = None, constraint_mode = args.constraint_mode, gen_length = args.gen_length,
+                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, validator = validator)
         
         def process_item(self, batch):
             batch = {key: value[0] for key, value in batch.items()}
@@ -197,7 +207,7 @@ def process_dataset_parallel(args):
     @ray.remote(num_gpus=1/args.num_workers_per_gpu)
     class ParseActor:
         def __init__(self):
-            self.parse_fn = get_evaluator(args.dataset)(args.dataset)
+            self.parse_fn = get_evaluator(args.dataset)(args.dataset, do_cot = args.do_cot)
             
         
         def process_item(self, batch):

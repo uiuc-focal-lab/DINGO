@@ -1,8 +1,12 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
-
-from transformers import AutoTokenizer, AutoModel
+from .viterbi import viterbi_block
+from transformers import AutoTokenizer, AutoModel 
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+from dfa import traverse_token_path
 
 
 def add_gumbel_noise(logits, temperature):
@@ -42,7 +46,7 @@ def get_num_transfer_tokens(mask_index, steps):
 
 class LLADA: 
     def __init__(self, model, tokenizer, constraint_mode = 'original', dfa_store = None, steps = 128, gen_length = 128,
-                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30):
+                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, validator = None):
         
         self.model = model 
         self.tokenizer = tokenizer 
@@ -56,9 +60,12 @@ class LLADA:
         self.mask_id = 126336
         self.dfa_store = dfa_store
         self.constrain_at = constrain_at
+        self.validator = validator
         if self.dfa_store is not None:
-            self._build_sparse_edges()
-    
+            self.edge_src = self.dfa_store.edge_src.clone().to(self.model.device)
+            self.edge_dst = self.dfa_store.edge_dst.clone().to(self.model.device)
+            self.edge_tok = self.dfa_store.edge_tok.clone().to(self.model.device)
+
     def _build_sparse_edges(self):
         """Convert self.dfa_store.transition_matrix (shape [S,S,max_toks], -1 means invalid)
         into three 1‑D tensors edge_src, edge_dst, edge_tok that enumerate **only**
@@ -79,7 +86,6 @@ class LLADA:
         self.edge_tok = edge_tok.to(self.model.device)
         self.num_states = tm.shape[0]
         self.num_edges  = self.edge_src.numel()
-        
 
     def __call__(self, prompt):
         input_ids = self.tokenizer(prompt)['input_ids']
@@ -195,19 +201,18 @@ class LLADA:
         assert self.steps % num_blocks == 0
         steps = self.steps // num_blocks
 
-        num_states = self.dfa_store.transition_matrix.shape[0]
+        num_states = self.dfa_store.num_states
 
         cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
         cost_vector[self.dfa_store.initial_state] = 0.0
 
-        global_vec_iter = 0
 
         for num_block in range(num_blocks):
             start_gen_idx = prompt.shape[1] + num_block * self.block_length
             end_gen_idx   = prompt.shape[1] + (num_block + 1) * self.block_length
             block_mask_index = (x[:, start_gen_idx:end_gen_idx] == self.mask_id)
             num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
-            vec_iter = global_vec_iter
+
             current_cost = cost_vector.clone()
             for i in range(steps):
                 mask_index = (x == self.mask_id)
@@ -222,42 +227,8 @@ class LLADA:
                     logits = self.model(x).logits
                 logits_with_noise = add_gumbel_noise(logits, temperature=self.temperature)
 
-                gen_logits = logits_with_noise[:, start_gen_idx:end_gen_idx, :] 
-                
-                selected_tokens = []
-                selected_sources = []
-                
-                if i >= self.constrain_at:
-                    current_cost = cost_vector.clone()
-                    vec_iter = global_vec_iter + self.block_length
-                
-                    gen_log_probs = F.log_softmax(gen_logits, dim=-1)[0]
-                    
 
-                    for pos in range(self.block_length):
-                        tok_log = gen_log_probs[pos]
-                        edge_score = current_cost[self.edge_src] + tok_log[self.edge_tok]
-                        
-                        # scatter‑max: next_cost[q'] = max_{edges src->q'} edge_score
-                        next_cost = torch.full_like(current_cost, -float('inf'))
-                        next_cost.scatter_reduce_(0, self.edge_dst, edge_score, reduce='amax')
-
-                        # grab the winning edge per dst state (for back‑pointer)
-                        mask = next_cost[self.edge_dst] == edge_score          # [E]
-                        chosen_edges = mask.nonzero(as_tuple=False).squeeze(1)
-
-                        next_tok  = torch.full_like(current_cost, -1, dtype=torch.long)
-                        next_src  = torch.full_like(current_cost, -1, dtype=torch.long)
-                        if chosen_edges.numel():
-                            next_tok[self.edge_dst[chosen_edges]] = self.edge_tok[chosen_edges]
-                            next_src[self.edge_dst[chosen_edges]] = self.edge_src[chosen_edges]
-
-                        selected_tokens.append(next_tok)
-                        selected_sources.append(next_src)
-
-                        current_cost = next_cost
-
-                x0 = torch.argmax(logits_with_noise, dim=-1)  
+                x0 = torch.argmax(logits_with_noise, dim=-1)
 
                 if self.remasking == 'low_confidence':
                     p = F.softmax(logits.to(torch.float32), dim=-1)
@@ -279,38 +250,42 @@ class LLADA:
                     transfer_index[j, select_index] = True
                 x[transfer_index] = x0[transfer_index]
 
+
+                is_valid = False
+                
                 if i >= self.constrain_at:
-                    if num_block == num_blocks - 1:
-                        best_intermediate_state = self.dfa_store.final_states[torch.argmax(current_cost[self.dfa_store.final_states])]
+                    if self.validator is not None:
+                        decoded_gen = self.tokenizer.decode(x[0, start_gen_idx:end_gen_idx], skip_special_tokens=True)
+                        is_valid = self.validator.validate(decoded_gen)                    
+
+                    if is_valid:
+                        best_intermediate_state = traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), self.dfa_store.token_transitions, cost_vector.argmax().item())
                     else:
-                        best_intermediate_state = torch.argmax(current_cost)
+                        gen_log_probs = F.log_softmax(logits_with_noise[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
+                        
 
-                    token_path = []
-                    for t in range(vec_iter - 1, global_vec_iter - 1, -1):
-                        tok = selected_tokens[t][best_intermediate_state].item()  
-                        token_path.append(tok)
-                        best_intermediate_state = selected_sources[t][best_intermediate_state].item() 
-                    token_path.reverse()
-                    x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
+                        current_cost, selected_tokens, selected_sources = viterbi_block(
+                            self.edge_src,
+                            self.edge_dst,
+                            self.edge_tok,
+                            gen_log_probs,
+                            cost_vector
+                        )
 
-            global_vec_iter = vec_iter
-            cost_vector = current_cost
-        # final_time = global_vec_iter
-        # final_costs = cost_vector[self.dfa_store.final_states] 
-        # best_final_index = torch.argmax(final_costs)
-        # best_state = self.dfa_store.final_states[best_final_index]
-        # best_cost  = final_costs[best_final_index]
 
-        # token_path = []
-        # curr_state = best_state
+                        if num_block == num_blocks - 1:
+                            best_intermediate_state = self.dfa_store.final_states[torch.argmax(current_cost[self.dfa_store.final_states])]
+                        else:
+                            best_intermediate_state = torch.argmax(current_cost)
 
-        # for t in range(final_time, 0, -1):
-        #     tok = selected_tokens[curr_state, t].item()  
-        #     token_path.append(tok)
-        #     curr_state = selected_sources[curr_state, t] 
+                        token_path = []
+                        for t in range((self.block_length * (num_block + 1)) - 1, (self.block_length * num_block) - 1, -1):
+                            tok = selected_tokens[t][best_intermediate_state].item()  
+                            token_path.append(tok)
+                            best_intermediate_state = selected_sources[t][best_intermediate_state].item() 
+                        token_path.reverse()
+                        x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
 
-        # token_path.reverse()
-
-        # x[:, prompt.shape[1]:] = torch.tensor(token_path, dtype=torch.long, device=x.device)
-
+            cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
+            cost_vector[best_intermediate_state] = 0.0
         return x

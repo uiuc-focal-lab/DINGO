@@ -79,17 +79,28 @@ def build_transition_matrix(transitions_by_state, max_tokens_transition):
     return transition_matrix
 
 
+def traverse_token_path(tokens, token_transitions, initial_state):
+    current_state = initial_state
+    for token in tokens:
+        current_state = token_transitions[(current_state, token)]
+        try:
+            assert current_state is not None, f'Invalid transition from {current_state} via {token}'
+        except:
+            import pdb; pdb.set_trace()
+    return current_state
+
 
 
 class DFAMatrixStore:
-    def __init__(self, task_name):
+    def __init__(self, task_name, do_cot=False):
         self.task_name = task_name
+        self.suffix = 'cot' if do_cot else 'std'
         
     def load(self):
         success = False
         Path('diffusion_cache').mkdir(parents=True, exist_ok=True)
-        if os.path.exists(f'diffusion_cache/{self.task_name}.pkl'): 
-            new_cls = pickle.load(open(f'diffusion_cache/{self.task_name}.pkl', 'rb'))
+        if os.path.exists(f'diffusion_cache/{self.task_name}_{self.suffix}.pkl'): 
+            new_cls = pickle.load(open(f'diffusion_cache/{self.task_name}_{self.suffix}.pkl', 'rb'))
             self.initial_state = new_cls.initial_state
             self.final_states = new_cls.final_states
             self.transition_matrix = new_cls.transition_matrix
@@ -98,7 +109,7 @@ class DFAMatrixStore:
         return success
     
     def build(self, tokenizer):
-        regex_path = f'regex_folder/{self.task_name}.text'
+        regex_path = f'regex_folder/{self.task_name}_{self.suffix}.text'
         if os.path.exists(regex_path):
             with open(regex_path, 'r') as f:
                 pattern = f.read()
@@ -126,6 +137,15 @@ class DFAMatrixStore:
         print(f"Number of vocabulary tokens: {vocab_size}")
         print(f"Total time taken: {total_time:.4f} seconds")
         
+        #tocan we transition to different final states from a final state via eos/eot
+        eot_id = tokenizer.convert_tokens_to_ids('<|eot_id|>')
+        for final_state in dfa.finals:
+            for final_state_2 in dfa.finals:
+                if eot_id is not None:
+                    token_transitions[(final_state, eot_id)] = final_state_2
+                if tokenizer.eos_token_id is not None:
+                    token_transitions[(final_state, tokenizer.eos_token_id)] = final_state_2
+
         # Group transitions by starting state and next state
         transitions_by_state = {}
         for (state, token_id), next_state in token_transitions.items():
@@ -136,33 +156,34 @@ class DFAMatrixStore:
                     transitions_by_state[state][next_state] = []
                 transitions_by_state[state][next_state].append(token_id)
         
-        for final_state in dfa.finals:
-            if final_state not in transitions_by_state:
-                transitions_by_state[final_state] = {}
-            
-            if final_state not in transitions_by_state[final_state]:
-                transitions_by_state[final_state][final_state] = []
-            
-            eot_id = tokenizer.convert_tokens_to_ids('<|eot_id|>')
-            if eot_id not in transitions_by_state[final_state][final_state]:
-                 transitions_by_state[final_state][final_state].append(eot_id)
-            
-            if tokenizer.eos_token_id not in transitions_by_state[final_state][final_state]:
-                transitions_by_state[final_state][final_state].append(tokenizer.eos_token_id)
-        
-        
-        max_tokens_transition = 0
-        for state in transitions_by_state: 
-            for next_state in transitions_by_state[state]: 
-                max_tokens_transition = max(max_tokens_transition, len(transitions_by_state[state][next_state]))
-        
 
-        transition_matrix = build_transition_matrix(transitions_by_state, max_tokens_transition)
+        edge_src, edge_dst, edge_tok = [], [], []
+        for src, dst_dict in transitions_by_state.items():
+            for dst, tok_ids in dst_dict.items():
+                edge_src.extend([src] * len(tok_ids))
+                edge_dst.extend([dst] * len(tok_ids))
+                edge_tok.extend(tok_ids)
+
+        edge_src = torch.tensor(edge_src, dtype=torch.long)  # [E]
+        edge_dst = torch.tensor(edge_dst, dtype=torch.long)  # [E]
+        edge_tok = torch.tensor(edge_tok, dtype=torch.long)  # [E]
+
+        # Optionally: sort by destination to improve scatter‑reduce locality
+        dst_order = torch.argsort(edge_dst)
+        edge_src = edge_src[dst_order]
+        edge_dst = edge_dst[dst_order]
+        edge_tok = edge_tok[dst_order]
+
+        # ---------- save to the DFA store ---------------------------------
         self.initial_state = dfa.initial
-        self.final_states = sorted(list(dfa.finals))
-        self.transition_matrix = transition_matrix
+        self.final_states  = sorted(list(dfa.finals))
+        self.edge_src      = edge_src           # tensors live on CPU for now
+        self.edge_dst      = edge_dst
+        self.edge_tok      = edge_tok
+        self.num_states    = len(states)
+        self.token_transitions = token_transitions
 
     
     def save(self):
-        with open(f'diffusion_cache/{self.task_name}.pkl', 'wb') as f:
+        with open(f'diffusion_cache/{self.task_name}_{self.suffix}.pkl', 'wb') as f:
             pickle.dump(self, f)
