@@ -43,7 +43,7 @@ class GSMSymbolicRegex:
         return re.compile(cot)
     
     @staticmethod
-    def define_lark_grammar():
+    def grammar_regex():
         """Define a Lark grammar that represents the same pattern as the direct regex"""
         current_dir = os.path.dirname(os.path.abspath(__file__))
         grammar_path = f"{current_dir}/grammar_folder/gsm_symbolic_simpl.lark"
@@ -127,7 +127,7 @@ def main():
     
     # Measure Lark grammar to regex compilation time
     start_time = time.time()
-    lark_grammar = GSMSymbolicRegex.define_lark_grammar()
+    lark_grammar = GSMSymbolicRegex.grammar_regex()
     lark_pattern_dict = lark_to_regex(lark_grammar)
     lark_pattern = lark_pattern_dict['start']
     lark_compile_time = time.time() - start_time
