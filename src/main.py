@@ -5,7 +5,6 @@ import argparse
 import numpy as np
 from tqdm import tqdm
 from models import *
-from validators import get_validator
 from evaluators import get_evaluator
 from pathlib import Path
 import atexit
@@ -75,10 +74,9 @@ def process_dataset_interactive(args):
     if args.constraint_mode == 'diffusion_constrained':
         assert args.constrain_at is not None
     
-    validator = get_validator(args.dataset) if args.enable_oppurtunistic and args.constraint_mode == 'diffusion_constrained' else None
 
     llm = BaseLM(args.model,args.dataset, 'cuda', args.do_cot, device_map = 'auto', constraint_mode = args.constraint_mode, steps = args.steps, gen_length = args.gen_length,
-                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, validator = validator)
+                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, enable_oppurtunistic = args.enable_oppurtunistic)
     
 
     dataset = load_dataset_by_name(args.dataset)
@@ -144,7 +142,6 @@ def process_dataset_parallel(args):
     if args.constraint_mode == 'diffusion_constrained':
         assert args.constrain_at is not None
     
-    validator = get_validator(args.dataset) if args.enable_oppurtunistic and args.constraint_mode == 'diffusion_constrained' else None
 
     dataset =  load_dataset_by_name(args.dataset)
     if args.end_idx == -1:
@@ -173,7 +170,7 @@ def process_dataset_parallel(args):
         def __init__(self):
             self.prompt_fn = BasePrompter(dataset = args.dataset, num_shots= args.num_shots, do_cot = args.do_cot)
             self.llm = BaseLM(args.model, args.dataset, 'cuda', args.do_cot, device_map = None, constraint_mode = args.constraint_mode, gen_length = args.gen_length,
-                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, validator = validator)
+                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, enable_oppurtunistic = args.enable_oppurtunistic)
         
         def process_item(self, batch):
             batch = {key: value[0] for key, value in batch.items()}

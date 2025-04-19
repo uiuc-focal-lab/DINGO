@@ -15,4 +15,3 @@ class BaseValidator(ABC):
     
     def _parse(self, code):
         return self.parser.parse(code)
-        

@@ -8,6 +8,50 @@ import torch
 import os
 import pickle
 from pathlib import Path
+from grammar_folder.grammar_to_regex import lark_to_regex
+import rust_dfa
+from collections import defaultdict, deque
+from typing import Any, Set, Dict
+
+def get_live_states(self) -> Set[Any]:
+    """
+    Return the set of all states reachable from the initial state that can
+    eventually reach a final state.
+    """
+    # 1) Build reverse-transition graph so we can walk backwards from finals
+    rev: Dict[Any, Set[Any]] = defaultdict(set)
+    for src, trans in self.transitions.items():
+        for symbol, tgt in trans.items():
+            rev[tgt].add(src)
+
+    # 2) Find all states that can reach a final (backward BFS from finals)
+    live_states: Set[Any] = set(self.finals)
+    queue = deque(self.finals)
+    while queue:
+        s = queue.popleft()
+        for prev in rev.get(s, ()):
+            if prev not in live_states:
+                live_states.add(prev)
+                queue.append(prev)
+
+    # 3) From initial, collect all reachable states (forward BFS)
+    reachable: Set[Any] = set()
+    queue = deque([self.initial])
+    while queue:
+        s = queue.popleft()
+        if s in reachable:
+            continue
+        reachable.add(s)
+        for tgt in self.transitions.get(s, {}).values():
+            queue.append(tgt)
+
+    # 4) Intersection: states both reachable from initial and live
+    result = reachable & live_states
+
+    # (Optional) update cache so future islive() calls are faster
+    self._live_states_cache.update(result)
+
+    return result
 
 def compute_token_transitions(tokenizer, fsm):
     """
@@ -92,29 +136,28 @@ def traverse_token_path(tokens, token_transitions, initial_state):
 
 
 class DFAMatrixStore:
-    def __init__(self, task_name, do_cot=False):
+    def __init__(self, task_name, do_cot=False, enable_oppurtunistic=False):
         self.task_name = task_name
         self.suffix = 'cot' if do_cot else 'std'
+        self.enable_oppurtunistic = enable_oppurtunistic
         
-    def load(self):
-        success = False
-        Path('diffusion_cache').mkdir(parents=True, exist_ok=True)
-        if os.path.exists(f'diffusion_cache/{self.task_name}_{self.suffix}.pkl'): 
-            new_cls = pickle.load(open(f'diffusion_cache/{self.task_name}_{self.suffix}.pkl', 'rb'))
-            self.initial_state = new_cls.initial_state
-            self.final_states = new_cls.final_states
-            self.transition_matrix = new_cls.transition_matrix
-            success = True
-        
-        return success
     
     def build(self, tokenizer):
-        regex_path = f'regex_folder/{self.task_name}_{self.suffix}.text'
-        if os.path.exists(regex_path):
-            with open(regex_path, 'r') as f:
-                pattern = f.read()
+        grammar_path = f'grammar_folder/{self.task_name}_{self.suffix}.lark'
+        if os.path.exists(grammar_path):
+            with open(grammar_path, 'r') as f:
+                grammar_string = f.read()
+            pattern_dict = lark_to_regex(grammar_string)
+            pattern = pattern_dict['start']
+        
         else:
-            raise FileNotFoundError(f"Regex not found at {regex_path}")
+            raise FileNotFoundError(f"Grammar not found at {grammar_path}")
+        
+        if self.enable_oppurtunistic:
+            validator = rust_dfa.RegexDFA() 
+            validator.initialize(pattern)
+            self.validator = validator
+        
         
         print(f"Creating ByteFSM for pattern: {pattern}")
         dfa = ByteFSM(pattern)
@@ -183,7 +226,11 @@ class DFAMatrixStore:
         self.num_states    = len(states)
         self.token_transitions = token_transitions
 
-    
-    def save(self):
-        with open(f'diffusion_cache/{self.task_name}_{self.suffix}.pkl', 'wb') as f:
-            pickle.dump(self, f)
+    def validate(self, code, is_final_block = False):
+        if self.enable_oppurtunistic:
+            if is_final_block:
+                return self.validator.matches(code)
+            else:
+                return self.validator.prefix_matches(code)
+        else:
+            return False

@@ -46,7 +46,7 @@ def get_num_transfer_tokens(mask_index, steps):
 
 class LLADA: 
     def __init__(self, model, tokenizer, constraint_mode = 'original', dfa_store = None, steps = 128, gen_length = 128,
-                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, validator = None):
+                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30):
         
         self.model = model 
         self.tokenizer = tokenizer 
@@ -60,7 +60,6 @@ class LLADA:
         self.mask_id = 126336
         self.dfa_store = dfa_store
         self.constrain_at = constrain_at
-        self.validator = validator
         if self.dfa_store is not None:
             self.edge_src = self.dfa_store.edge_src.clone().to(self.model.device)
             self.edge_dst = self.dfa_store.edge_dst.clone().to(self.model.device)
@@ -254,9 +253,9 @@ class LLADA:
                 is_valid = False
                 
                 if i >= self.constrain_at:
-                    if self.validator is not None:
-                        decoded_gen = self.tokenizer.decode(x[0, start_gen_idx:end_gen_idx], skip_special_tokens=True)
-                        is_valid = self.validator.validate(decoded_gen)                    
+                    if self.dfa_store.enable_oppurtunistic:
+                        decoded_gen = self.tokenizer.decode(x[0, prompt.shape[1]:end_gen_idx], skip_special_tokens=True)
+                        is_valid = self.dfa_store.validate(decoded_gen, is_final_block = num_block == num_blocks - 1)                 
 
                     if is_valid:
                         best_intermediate_state = traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), self.dfa_store.token_transitions, cost_vector.argmax().item())
@@ -279,7 +278,7 @@ class LLADA:
                             best_intermediate_state = torch.argmax(current_cost)
 
                         token_path = []
-                        for t in range((self.block_length * (num_block + 1)) - 1, (self.block_length * num_block) - 1, -1):
+                        for t in range(self.block_length - 1, - 1, -1):
                             tok = selected_tokens[t][best_intermediate_state].item()  
                             token_path.append(tok)
                             best_intermediate_state = selected_sources[t][best_intermediate_state].item() 
