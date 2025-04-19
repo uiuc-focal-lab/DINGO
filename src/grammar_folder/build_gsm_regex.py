@@ -5,6 +5,7 @@ import unittest
 from syncode.larkm import Lark
 from grammar_to_regex import lark_to_regex
 import rust_dfa
+from transformers import AutoTokenizer
 
 
 class GSMSymbolicRegex:
@@ -113,12 +114,49 @@ class RegexTest(unittest.TestCase):
         print(f"\nDFA Match Times: {[f'{t*1000:.2f}ms' for t in match_times]}")
 
 
+class TokenTransitionTest(unittest.TestCase):
+    """Test cases for token transitions"""
+    
+    def test_compute_token_transitions(self):
+        """Test the compute_token_transitions method with Qwen tokenizer"""
+        # Create DFA
+        lark_grammar = GSMSymbolicRegex.grammar_regex()
+        lark_pattern_dict = lark_to_regex(lark_grammar)
+        lark_pattern = lark_pattern_dict['start']
+        
+        dfa = rust_dfa.RegexDFA()
+        dfa.initialize(lark_pattern)
+        
+        # Initialize Qwen tokenizer
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B")
+        
+        # Setup byte tokenizer
+        from syncode.mask_store.byte_tokenizer import ByteTokenizer
+        byte_tokenizer = ByteTokenizer(tokenizer)
+        vocab = byte_tokenizer.byte_vocab
+        
+        # Compute token transitions
+        start_time = time.time()
+        dfa.compute_token_transitions(vocab)
+        compute_time = time.time() - start_time
+        
+        # Get DFA size before and after
+        dfa_size_before = dfa.size()
+        token_transitions_size = dfa.token_transitions_size()
+        
+        print(f"\nToken Transitions Computation Time: {compute_time*1000:.2f}ms")
+        print(f"DFA Size: {dfa_size_before}")
+        print(f"Token Transitions Size: {token_transitions_size}")
+        
+        # Basic verification that token transitions were computed
+        self.assertTrue(token_transitions_size > 0, "Token transitions size should be greater than 0")
+
+
 def main():
     # Create timing variables first
     direct_compile_time = 0
     lark_compile_time = 0
     dfa_init_time = 0
-    dfa_size = 0
     
     # Measure direct regex compilation time
     start_time = time.time()
@@ -135,7 +173,7 @@ def main():
     # Measure DFA initialization time
     dfa = rust_dfa.RegexDFA()
     start_time = time.time()
-    dfa_size = dfa.initialize(lark_pattern)
+    dfa.initialize(lark_pattern)
     dfa_init_time = time.time() - start_time
     
     # Print compilation time comparison
@@ -143,7 +181,7 @@ def main():
     print(f"Direct Regex Compilation Time: {direct_compile_time*1000:.2f}ms")
     print(f"Lark Grammar to Regex Compilation Time: {lark_compile_time*1000:.2f}ms")
     print(f"DFA Initialization Time: {dfa_init_time*1000:.2f}ms")
-    print(f"DFA Size: {dfa_size}")
+    print(f"DFA Size: {dfa.size()}")
     
     # Print pattern information
     print("\n===== REGEX PATTERNS =====")
@@ -156,8 +194,13 @@ def main():
     RegexTest.dfa = dfa
     
     # Run tests
-    print("\n===== RUNNING TESTS =====")
-    unittest.main(argv=['first-arg-is-ignored'], exit=False)
+    print("\n===== RUNNING REGEX TESTS =====")
+    regex_suite = unittest.TestLoader().loadTestsFromTestCase(RegexTest)
+    unittest.TextTestRunner(verbosity=2).run(regex_suite)
+    
+    print("\n===== RUNNING TOKEN TRANSITION TEST =====")
+    token_suite = unittest.TestLoader().loadTestsFromTestCase(TokenTransitionTest)
+    unittest.TextTestRunner(verbosity=2).run(token_suite)
 
 
 if __name__ == "__main__":
