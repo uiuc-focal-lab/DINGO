@@ -18,10 +18,19 @@ class GSMSymbolicEvaluator(BaseEvaluator):
             return None  
 
     def evaluate_answer(self, gen_output):
+        llm_responses = gen_output['llm_response']
+        llm_responses = llm_responses.split('\n')
+        
+        llm_response = ''
+        for llr in llm_responses:
+            if llr != '':
+                llm_response = llr
+                break
+
         if self.do_cot:
-            completion = self.parse_completion_regex(gen_output['llm_response'])
+            completion = self.parse_completion_regex(llm_response)
         else:
-            completion = gen_output['llm_response']
+            completion = llm_response
         
         parses = self.pattern.match(completion) if completion is not None else None
         parses = parses is not None
@@ -37,7 +46,8 @@ class GSMSymbolicEvaluator(BaseEvaluator):
             'gold_answer': gen_output['answer'],
             'correct': correct,
             'parses': parses,
-            'llm_response': gen_output['llm_response'],
+            'full_llm_response': gen_output['llm_response'],
+            'llm_response': llm_response,
             'parsed_completion': completion, 
             'time': gen_output['response_info']['time'], 
         }
