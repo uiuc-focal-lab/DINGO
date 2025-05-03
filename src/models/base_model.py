@@ -29,6 +29,7 @@ class BaseLM:
             raise ValueError(f"Model {model_name} not supported")
         
         dfa_store = None
+        ar_logits_processor = None
         if constraint_mode == 'diffusion_constrained':
             dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic)
             dfa_store.build(self.tokenizer)
