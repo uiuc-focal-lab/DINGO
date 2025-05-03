@@ -126,7 +126,6 @@ impl RegexDFA {
                     Ok(s) => s,
                     Err(_) => continue,
                 };
-                
                 // Process each byte of the token
                 let mut result_state = Some(state_id);
                 
@@ -173,6 +172,29 @@ impl RegexDFA {
         }
     }
 
+    // New method to get all token transitions as a Python dict
+    fn get_all_token_transitions(&self, py: Python) -> PyResult<Py<PyDict>> {
+        match &self.token_transitions {
+            Some(transitions) => {
+                let dict = PyDict::new(py);
+                for ((state, token_id), next_state) in transitions {
+                    // Only include transitions where both source and destination states are alive
+                    if self.alive_states.contains(state) && next_state.map_or(false, |ns| self.alive_states.contains(&ns)) {
+                        let key = (state, token_id);
+                        match next_state {
+                            Some(state) => dict.set_item(key, state)?,
+                            None => dict.set_item(key, py.None())?
+                        }
+                    }
+                }
+                Ok(dict.into())
+            },
+            None => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Token transitions not computed. Call compute_token_transitions() first."
+            ))
+        }
+    }
+
     fn walk(&self, input: &str) -> PyResult<usize> {
         // Ensure DFA is initialized
         let dfa = match &self.dfa {
@@ -195,7 +217,6 @@ impl RegexDFA {
                 format!("Failed to get start state: {}", e)
             ))
         };
-        
         // Walk through the DFA state by state
         for &byte in bytes {
             state = dfa.next_state(state, byte);
@@ -414,7 +435,6 @@ impl RegexDFA {
         
         // Get the final state by walking the DFA
         let final_state_usize = self.walk(input)?;
-        
         // If it's a dead state, it can't lead to a match
         if dfa.is_dead_state(StateID::new(final_state_usize).unwrap()) {
             return Ok(false);
@@ -422,6 +442,61 @@ impl RegexDFA {
         
         // Check if the state is alive (can reach an accepting state)
         Ok(self.alive_states.contains(&final_state_usize))
+    }
+    
+    fn get_initial_state(&self) -> PyResult<usize> {
+        // Ensure DFA is initialized
+        let dfa = match &self.dfa {
+            Some(dfa) => dfa,
+            None => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "DFA not initialized. Call initialize() first."
+            ))
+        };
+        
+        // Get the initial state
+        let config = start::Config::new().anchored(Anchored::Yes);
+        let start_state = match dfa.start_state(&config) {
+            Ok(state) => state,
+            Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Failed to get start state: {}", e)
+            ))
+        };
+        
+        Ok(start_state.as_usize())
+    }
+    
+    fn get_final_states(&self) -> PyResult<Vec<usize>> {
+        // Ensure DFA is initialized
+        let dfa = match &self.dfa {
+            Some(dfa) => dfa,
+            None => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "DFA not initialized. Call initialize() first."
+            ))
+        };
+        
+        let mut final_states = Vec::new();
+        
+        // Ensure we have computed the reachable states
+        if self.states.is_none() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "States not computed. Call count_reachable_states() first."
+            ));
+        }
+        
+        // Check each reachable state to see if it's a match state
+        for &state_id in self.states.as_ref().unwrap() {
+            let state = match StateID::new(state_id) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            
+            let eoi_state = dfa.next_eoi_state(state);
+            if dfa.is_match_state(eoi_state) {
+                final_states.push(state_id);
+            }
+        }
+        
+        Ok(final_states)
     }
 }
 

@@ -9,7 +9,9 @@ from copy import deepcopy
 class BasePrompter(ABC):
     def __init__(self, dataset, num_shots=8, do_cot = False) -> None:
         self.num_shots = num_shots
-        with open(f'prompt_templates/{dataset}.yaml', 'r') as file:
+        #get current file directory     
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        with open(f'{current_file_dir}/prompt_templates/{dataset}.yaml', 'r') as file:
             self.config = yaml.safe_load(file)
         
         if 'fewshots' in self.config:

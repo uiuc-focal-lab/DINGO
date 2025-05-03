@@ -5,7 +5,7 @@ import os
 import time
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-from dfa import DFAMatrixStore
+from dfa import DFAMatrixStore, load_ar_logits_processor
 
 class BaseLM:
     def __init__(self, model_name, task_name, device, do_cot, device_map = None, constraint_mode = 'original', steps = 128, gen_length = 128,
@@ -32,8 +32,10 @@ class BaseLM:
         if constraint_mode == 'diffusion_constrained':
             dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic)
             dfa_store.build(self.tokenizer)
+        elif constraint_mode == 'ar_constrained':
+            ar_logits_processor = load_ar_logits_processor(task_name, do_cot, self.tokenizer, enable_oppurtunistic)
     
-        self.generator = eval(f'{self.backend}')(self.model, self.tokenizer, constraint_mode, dfa_store, steps, gen_length, block_length, temperature, cfg_scale, remasking, constrain_at)
+        self.generator = eval(f'{self.backend}')(self.model, self.tokenizer, constraint_mode, dfa_store, ar_logits_processor, steps, gen_length, block_length, temperature, cfg_scale, remasking, constrain_at)
     
     
     def __call__(self, batch):
