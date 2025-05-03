@@ -251,7 +251,7 @@ class DFAMatrixStore:
         Path(token_transitions_path).parent.mkdir(parents=True, exist_ok=True)
         if os.path.exists(token_transitions_path):
             with open(token_transitions_path, 'rb') as f:
-                self.token_transitions = pickle.load(f)
+                token_transitions = pickle.load(f)
         else:   
             byte_tokenizer = ByteTokenizer(tokenizer)
             vocab = byte_tokenizer.byte_vocab

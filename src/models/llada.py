@@ -240,8 +240,8 @@ class LLADA:
                         # 5. (optional) put the processed logits back if other code later relies on them
                         logits_with_noise[:, j:j+1, :] = current_logits
                         
-                        x0 = torch.cat([x[:, :start_gen_idx], torch.stack(gen_ids, dim=1)], dim=1)
-                        xc  = x0.clone()
+                    x0 = torch.cat([x[:, :start_gen_idx], torch.stack(gen_ids, dim=1), x[:, end_gen_idx:]], dim=1)
+                    xc  = x0.clone()
                 else:
                     x0 = torch.argmax(logits_with_noise, dim=-1)
 
