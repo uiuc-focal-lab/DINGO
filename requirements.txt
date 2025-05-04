@@ -2,10 +2,9 @@ accelerate
 fire
 interegular
 regex==2023.8.8
-syncode
 torch
 tqdm
-transformers==4.38.2
+syncode
 datasets
 jsonschema
 intxeger

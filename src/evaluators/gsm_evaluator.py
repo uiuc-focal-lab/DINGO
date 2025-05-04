@@ -17,28 +17,11 @@ class GSMSymbolicEvaluator(BaseEvaluator):
         except:
             return None  
 
-    def extract_question_trace(self, response):
-        try:
-            # Find the start of "The final answer is" sentence
-            start_idx = response.find("The final answer is")
-            if start_idx == -1:
-                return response
-            
-            # Find the next period after "The final answer is"
-            end_idx = response.find(".", start_idx)
-            if end_idx == -1:
-                return response
-                
-            # Return the text up to and including the period
-            return response[:end_idx + 1]
-        except:
-            return response
 
     def evaluate_answer(self, gen_output):
         llm_response = gen_output['llm_response']
         
         if self.do_cot:
-            llm_response = self.extract_question_trace(llm_response)
             completion = self.parse_completion_regex(llm_response)
         else:
             completion = llm_response
@@ -57,7 +40,6 @@ class GSMSymbolicEvaluator(BaseEvaluator):
             'gold_answer': gen_output['answer'],
             'correct': correct,
             'parses': parses,
-            'full_llm_response': gen_output['llm_response'],
             'llm_response': llm_response,
             'parsed_completion': completion, 
             'time': gen_output['response_info']['time'], 

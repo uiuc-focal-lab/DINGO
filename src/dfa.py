@@ -137,6 +137,49 @@ def traverse_token_path(tokens, token_transitions, initial_state):
 
 
 
+def build_augment_token_transitions(dfa, tokenizer, initial_state, final_states, token_transitions_path):
+    if os.path.exists(token_transitions_path):
+        with open(token_transitions_path, 'rb') as f:
+            token_transitions = pickle.load(f)
+        
+        all_states = set()
+        for (src_state, _), dst_state in token_transitions.items():
+            all_states.add(src_state)
+            if dst_state is not None:
+                all_states.add(dst_state)
+    else:
+        byte_tokenizer = ByteTokenizer(tokenizer)
+        vocab = byte_tokenizer.byte_vocab
+        dfa.compute_token_transitions(vocab)
+        token_transitions = dfa.get_all_token_transitions()
+        
+
+        # Add transitions for EOS and EOT tokens between final states
+        eot_id = tokenizer.convert_tokens_to_ids('<|eot_id|>')
+        for final_state in final_states:
+            if eot_id is not None:
+                token_transitions[(final_state, eot_id)] = final_state
+            if tokenizer.eos_token_id is not None:
+                token_transitions[(final_state, tokenizer.eos_token_id)] = final_state
+        
+        # Collect all unique states from transitions
+        all_states = set()
+        for (src_state, _), dst_state in token_transitions.items():
+            all_states.add(src_state)
+            if dst_state is not None:
+                all_states.add(dst_state)
+        
+        import pdb; pdb.set_trace()
+        
+        for state in all_states: 
+            token_transitions[(state, 126336)] = state  
+        
+        with open(token_transitions_path, 'wb') as f:
+            pickle.dump(token_transitions, f)
+        
+    return token_transitions, all_states
+
+
 class ARLogitsProcessor:
     def __init__(self, task_name, do_cot, tokenizer, enable_oppurtunistic = False):
         self.task_name = task_name
@@ -162,16 +205,9 @@ class ARLogitsProcessor:
         current_file_dir = os.path.dirname(os.path.abspath(__file__))
         token_transitions_path = f'{current_file_dir}/token_transitions/{self.task_name}_{self.suffix}.pkl'
         Path(token_transitions_path).parent.mkdir(parents=True, exist_ok=True)
-        if os.path.exists(token_transitions_path):
-            with open(token_transitions_path, 'rb') as f:
-                self.token_transitions = pickle.load(f)
-        else:
-            byte_tokenizer = ByteTokenizer(tokenizer)
-            vocab = byte_tokenizer.byte_vocab
-            self.dfa.compute_token_transitions(vocab)
-            self.token_transitions = self.dfa.get_all_token_transitions()
-            with open(token_transitions_path, 'wb') as f:
-                pickle.dump(self.token_transitions, f)
+        initial_state = self.dfa.get_initial_state()
+        final_states = self.dfa.get_final_states()
+        self.token_transitions, all_states = build_augment_token_transitions(self.dfa, self.tokenizer, initial_state, final_states, token_transitions_path)
     
     def is_valid(self, input_ids, next_token_id):
         ids_to_traverse = input_ids[0].tolist() + next_token_id.tolist() if not isinstance(next_token_id, int) else input_ids[0].tolist() + [next_token_id]
@@ -246,43 +282,19 @@ class DFAMatrixStore:
         dfa = rust_dfa.RegexDFA()
         dfa.initialize(pattern)
         
+        # Get initial state and final states using the new methods
+        initial_state = dfa.get_initial_state()
+        final_states = dfa.get_final_states()
+
         current_file_dir = os.path.dirname(os.path.abspath(__file__))
         token_transitions_path = f'{current_file_dir}/token_transitions/{self.task_name}_{self.suffix}.pkl'
-        Path(token_transitions_path).parent.mkdir(parents=True, exist_ok=True)
-        if os.path.exists(token_transitions_path):
-            with open(token_transitions_path, 'rb') as f:
-                token_transitions = pickle.load(f)
-        else:   
-            byte_tokenizer = ByteTokenizer(tokenizer)
-            vocab = byte_tokenizer.byte_vocab
-            dfa.compute_token_transitions(vocab)
-            token_transitions = dfa.get_all_token_transitions()
-            with open(token_transitions_path, 'wb') as f:
-                pickle.dump(token_transitions, f)
+        Path(token_transitions_path).parent.mkdir(parents=True, exist_ok=True) 
+        token_transitions, all_states = build_augment_token_transitions(dfa, tokenizer, initial_state, final_states, token_transitions_path)
         
         # Save the original DFA for validation if enabled
         if self.enable_oppurtunistic:
             self.validator = dfa
         
-        # Get initial state and final states using the new methods
-        initial_state = dfa.get_initial_state()
-        final_states = dfa.get_final_states()
-
-        # Add transitions for EOS and EOT tokens between final states
-        eot_id = tokenizer.convert_tokens_to_ids('<|eot_id|>')
-        for final_state in final_states:
-            for final_state_2 in final_states:
-                if eot_id is not None:
-                    token_transitions[(final_state, eot_id)] = final_state_2
-                if tokenizer.eos_token_id is not None:
-                    token_transitions[(final_state, tokenizer.eos_token_id)] = final_state_2
-
-        # Collect all unique states from transitions
-        all_states = set()
-        for (src_state, _), dst_state in token_transitions.items():
-            all_states.add(src_state)
-            if dst_state is not None:
-                all_states.add(dst_state)
         
         # Create a mapping from original state IDs to consecutive integers
         self.state_mapping = {old_id: new_id for new_id, old_id in enumerate(sorted(all_states))}

@@ -25,6 +25,8 @@ class BaseLM:
             self.backend = 'DREAM' 
         elif 'llada' in model_name.lower():
             self.backend = 'LLADA'
+        elif 'diffu_llama' in model_name.lower():
+            self.backend = 'DiffuLlama'
         else:
             raise ValueError(f"Model {model_name} not supported")
         
