@@ -265,7 +265,7 @@ impl RegexDFA {
         };
         
         // Start from the initial state
-        let config = start::Config::new();
+        let config = start::Config::new().anchored(Anchored::Yes);
         let start_state = match dfa.start_state(&config) {
             Ok(state) => state,
             Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
@@ -387,7 +387,7 @@ impl RegexDFA {
         };
         
         // Start from the initial state
-        let config = start::Config::new();
+        let config = start::Config::new().anchored(Anchored::Yes);
         let start_state = match dfa.start_state(&config) {
             Ok(state) => state,
             Err(e) => return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(

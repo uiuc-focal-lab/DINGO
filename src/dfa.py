@@ -169,7 +169,7 @@ def build_augment_token_transitions(dfa, tokenizer, initial_state, final_states,
             if dst_state is not None:
                 all_states.add(dst_state)
         
-        import pdb; pdb.set_trace()
+    
         
         for state in all_states: 
             token_transitions[(state, 126336)] = state  

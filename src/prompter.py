@@ -8,6 +8,9 @@ from copy import deepcopy
 
 class BasePrompter(ABC):
     def __init__(self, dataset, num_shots=8, do_cot = False) -> None:
+        self.dataset = dataset
+        if self.dataset == 'json_mode':
+            return
         self.num_shots = num_shots
         #get current file directory     
         current_file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -34,6 +37,8 @@ class BasePrompter(ABC):
         
       
     def prompt(self, row, modify_system_prompt = True, chat_mode = True):
+        if self.dataset == 'json_mode': 
+            return row['prompt']
         messages = []
         if chat_mode:
             for example in self.fewshots[:self.num_shots]:

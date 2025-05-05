@@ -39,6 +39,23 @@ def load_dataset_by_name(task_name):
                     
         ds = Dataset.from_list(data)
         return ds
+    elif task_name == 'json_mode':
+        data = []
+        i = 0
+        for row in load_dataset('NousResearch/json-mode-eval', split = 'train'):
+            data.append({**row, 'idx': i})
+            i += 1
+        ds = Dataset.from_list(data)
+        return ds
+    elif task_name == 'schema_bench':
+        data = []
+        i = 0
+        for row in load_dataset("epfl-dlab/JSONSchemaBench", "Github_trivial", split = 'train'):
+            data.append({'question': row['json_schema'], 'json_schema': row['json_schema'], 'idx': i})
+            i += 1
+        ds = Dataset.from_list(data)
+        return ds
+        
     else:
         raise ValueError(f"Dataset {task_name} not found")
     

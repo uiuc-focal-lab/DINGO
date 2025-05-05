@@ -14,8 +14,7 @@ from prompter import BasePrompter
 from dataset import load_dataset_by_name
 
 
-os.environ['HF_HOME'] = '/workspace/hf_cache'
-os.environ['HF_CACHE'] = '/workspace/hf_cache'
+
 
 
 # Setting up argument parsing

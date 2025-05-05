@@ -159,6 +159,8 @@ class LLADA:
                     _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
                     transfer_index[j, select_index] = True
                 x[transfer_index] = x0[transfer_index]
+                # bob = [x0[0, q] for q in torch.where(transfer_index[0] == True)[0].tolist()]
+                # print(f'Iteration {i} ', bob, self.tokenizer.batch_decode(bob))
 
                 if i >= self.constrain_at:
                     decoded_gen = self.tokenizer.decode(x[0, prompt.shape[1]:end_gen_idx], skip_special_tokens=True)
