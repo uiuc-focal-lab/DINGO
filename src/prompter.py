@@ -68,5 +68,5 @@ class BasePrompter(ABC):
             return messages
         
         else:
-            prompt = '\n'.join(messages + [self.instruction_str + '\n' + example['question'] + '\n' + example['response'] for example in self.fewshots[:self.num_shots]] + [self.instruction_str + '\n' + row['question']])
+            prompt = '\n'.join([example['question'] + '\n' + example['response'] for example in self.fewshots[:self.num_shots]] + [row['question']])
             return prompt

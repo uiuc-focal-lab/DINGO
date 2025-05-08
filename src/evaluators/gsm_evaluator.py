@@ -5,11 +5,24 @@ import re
 import random
 from copy import deepcopy
 import signal
+import os
+from grammar_folder.grammar_to_regex import lark_to_regex
+import rust_dfa
 
 class GSMSymbolicEvaluator(BaseEvaluator):
     def __init__(self, dataset, do_cot = False):
         super().__init__(dataset, do_cot)
-        self.pattern = re.compile(r'^<<( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\)))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\)))*\)))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\)))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\))(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}|\((?:[a-z]|[0-9]{1,3})(?:( )?(?:[+\-]|\/\/|\/|%|\*|\*\*)( )?(?:[a-z]|[0-9]{1,3}))*\)))*\)))*\)))*( )?>>$')
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        parent_dir = os.path.dirname(current_file_dir)
+        suffix = 'cot' if do_cot else 'std'
+        grammar_path = f'{parent_dir}/grammar_folder/gsm_symbolic_{suffix}.lark'
+        if os.path.exists(grammar_path):
+            with open(grammar_path, 'r') as f:
+                grammar_string = f.read()
+            pattern_dict = lark_to_regex(grammar_string)
+            pattern = pattern_dict['start']
+            self.dfa = rust_dfa.RegexDFA()
+            self.dfa.initialize(pattern)
     
     def parse_completion_regex(self, response):
         try:
@@ -17,19 +30,39 @@ class GSMSymbolicEvaluator(BaseEvaluator):
         except:
             return None  
 
+    def extract_question_trace(self, response):
+        try:
+            start_idx = response.find("final answer")
+            if start_idx == -1:
+                return response
+            end_idx = response.find(">>", start_idx)
+            if end_idx == -1:
+                return response
+            return response[:end_idx + len(">>") + 1]
+        except:
+            return response
+
 
     def evaluate_answer(self, gen_output):
-        llm_response = gen_output['llm_response']
+        full_llm_response = gen_output['llm_response']
         
+        llm_response = full_llm_response
+        
+        if self.do_cot:
+            llm_response = self.extract_question_trace(full_llm_response)
+
+            if not llm_response.endswith("."):
+                llm_response = llm_response + "."
+        if llm_response.endswith("\n."):
+            llm_response = llm_response.rstrip("\n.") + "."
+        parses = self.dfa.matches(llm_response) if llm_response is not None else False
         if self.do_cot:
             completion = self.parse_completion_regex(llm_response)
         else:
             completion = llm_response
-        
-        parses = self.pattern.match(completion) if completion is not None else None
-        parses = parses is not None
+
         correct = False
-        if completion is not None:
+        if parses and completion is not None:
             completion = completion.strip()
             if completion.startswith('<<') and completion.endswith('>>'):
                 completion = completion[2:-2].strip()
@@ -41,6 +74,7 @@ class GSMSymbolicEvaluator(BaseEvaluator):
             'correct': correct,
             'parses': parses,
             'llm_response': llm_response,
+            'full_llm_response': full_llm_response,
             'parsed_completion': completion, 
             'time': gen_output['response_info']['time'], 
         }

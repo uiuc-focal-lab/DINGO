@@ -12,8 +12,10 @@ import torch
 from datasets import Dataset
 from prompter import BasePrompter
 from dataset import load_dataset_by_name
+from dfa import build_for_dataset
+from transformers import AutoTokenizer
 
-
+os.environ['HF_HOME'] = os.environ['HF_CACHE']
 
 
 
@@ -75,17 +77,19 @@ def process_dataset_interactive(args):
     if args.constraint_mode == 'diffusion_constrained':
         assert args.constrain_at is not None
     
-
-    llm = BaseLM(args.model,args.dataset, 'cuda', args.do_cot, device_map = 'auto', constraint_mode = args.constraint_mode, steps = args.steps, gen_length = args.gen_length,
-                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, enable_oppurtunistic = args.enable_oppurtunistic)
+    dataset, schema_key = load_dataset_by_name(args.dataset)
     
-
-    dataset = load_dataset_by_name(args.dataset)
-
+    llm = BaseLM(args.model,args.dataset, 'cuda', args.do_cot, device_map = 'auto', constraint_mode = args.constraint_mode, steps = args.steps, gen_length = args.gen_length,
+                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, enable_oppurtunistic = args.enable_oppurtunistic, schema_key = schema_key)
+    
     if args.end_idx == -1:
         args.end_idx = len(dataset)
     
     dataset = dataset.select(range(args.start_idx, args.end_idx))
+    if args.constraint_mode in ['diffusion_constrained', 'ar_constrained']:
+        dfa_stores = build_for_dataset(dataset, schema_key, args.dataset, args.do_cot, llm.tokenizer, llm.model.device, args.enable_oppurtunistic)
+    else:
+        dfa_stores = [None] * len(dataset)
     
     results = []
     processed_ids = set()
@@ -118,7 +122,7 @@ def process_dataset_interactive(args):
             prompt = prompt_fn.prompt(row, chat_mode=chat_mode)
             batch = {**row, 'prompt': prompt}
 
-            new_batch = llm(batch)
+            new_batch = llm(batch, dfa_stores[idx])
             
             res = parse_fn.evaluate_answer(new_batch)
             
@@ -144,10 +148,13 @@ def process_dataset_parallel(args):
         assert args.constrain_at is not None
     
 
-    dataset =  load_dataset_by_name(args.dataset)
+    dataset, schema_key =  load_dataset_by_name(args.dataset)
     if args.end_idx == -1:
         args.end_idx = len(dataset)
     dataset = dataset.select(range(args.start_idx, args.end_idx))
+    
+    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code = True, cache_dir = os.environ['HF_CACHE'])
+    dfa_stores = build_for_dataset(dataset, schema_key, args.dataset, args.do_cot, tokenizer, llm.model.device, args.enable_oppurtunistic)
     
     results = []
     processed_ids = set()
@@ -171,7 +178,7 @@ def process_dataset_parallel(args):
         def __init__(self):
             self.prompt_fn = BasePrompter(dataset = args.dataset, num_shots= args.num_shots, do_cot = args.do_cot)
             self.llm = BaseLM(args.model, args.dataset, 'cuda', args.do_cot, device_map = None, constraint_mode = args.constraint_mode, gen_length = args.gen_length,
-                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, enable_oppurtunistic = args.enable_oppurtunistic)
+                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, enable_oppurtunistic = args.enable_oppurtunistic, schema_key = schema_key)
         
         def process_item(self, batch):
             batch = {key: value[0] for key, value in batch.items()}
@@ -184,13 +191,16 @@ def process_dataset_parallel(args):
     actors = [PromptActor.remote() for _ in range(args.num_gpus * args.num_workers_per_gpu)]
 
     futures = []
+    d_idx = 0
     for batch in ray_dataset.iter_batches(batch_size= 1):
         actor_id = len(futures) % len(actors)
-        futures.append(actors[actor_id].process_item.remote(batch))    
+        futures.append(actors[actor_id].process_item.remote(batch, dfa_stores[d_idx]))    
+        d_idx += 1
     
     initial_responses = ray.get(futures)
     
     del actors
+    del dfa_stores
     torch.cuda.empty_cache()
 
     new_dataset = []

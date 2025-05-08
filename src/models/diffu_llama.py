@@ -1,7 +1,7 @@
 import torch
 import torch.distributions as dists
 import torch.nn.functional as F
-from attention_patch import replace_attention_mask 
+from .attention_patch import replace_attention_mask 
 replace_attention_mask()
 import transformers
 

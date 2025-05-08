@@ -11,3 +11,6 @@ src/logging/
 **/__pycache__/
 *.pyc
 src/rust_dfa/target/
+src/cache/
+src/dfa_store/
+src/run_*.sh

@@ -1,6 +1,16 @@
 import torch
-from transformers import AutoModel, AutoTokenizer, GenerationConfig
+from transformers import AutoModel, AutoTokenizer, GenerationConfig, __version__
 from typing import Optional, Union
+import torch.distributions as dists
+import torch.nn.functional as F
+import warnings
+from transformers.utils import (
+    ModelOutput,
+    is_torchdynamo_compiling,
+    logging,
+)
+from .viterbi import viterbi_block
+from .gen_utils import find_target_after_phrase, find_target_after_phrase_str
 
 class DreamGenerationConfig(GenerationConfig):
     def __init__(self, **kwargs):
@@ -43,7 +53,6 @@ class DreamGenerationConfig(GenerationConfig):
                 try:
                     setattr(self, key, value)
                 except AttributeError as err:
-                    logger.error(f"Can't set {key} with value {value} for {self}")
                     raise err
 
         # Validate the values of the attributes
@@ -109,8 +118,8 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
     return confidence, x0
 
 class DREAM: 
-    def __init__(self, model, tokenizer, constraint_mode = 'original', dfa_store = None, ar_logits_processor = None, steps = 128, gen_length = 128,
-                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30):
+    def __init__(self, model, tokenizer, constraint_mode = 'original', steps = 128, gen_length = 128,
+                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, stop_word = None, stop_phrase = None, opp_end_char = None):
         
         self.model = model 
         self.tokenizer = tokenizer 
@@ -121,15 +130,18 @@ class DREAM:
         self.temperature = temperature 
         self.cfg_scale = cfg_scale 
         self.remasking = remasking 
-        self.dfa_store = dfa_store
-        self.ar_logits_processor = ar_logits_processor
         self.constrain_at = constrain_at
-        if self.dfa_store is not None:
-            self.edge_src = self.dfa_store.edge_src.clone().to(self.model.device)
-            self.edge_dst = self.dfa_store.edge_dst.clone().to(self.model.device)
-            self.edge_tok = self.dfa_store.edge_tok.clone().to(self.model.device)
-    
-    def __call__(self, prompt):
+        self.target_word = stop_word
+        self.phrase = stop_phrase
+        self.opp_end_char = opp_end_char
+        
+    def __call__(self, prompt, dfa_store = None):
+        if dfa_store is not None:
+            self.dfa_store = dfa_store
+            self.edge_src = dfa_store.edge_src
+            self.edge_dst = dfa_store.edge_dst
+            self.edge_tok = dfa_store.edge_tok
+        
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
         if self.constraint_mode in ['unconstrained', 'ar_constrained', 'diffusion_constrained']:
             output_ids = self.generate(inputs.input_ids, inputs.attention_mask, constraint_mode=self.constraint_mode, max_new_tokens=self.gen_length,
@@ -143,8 +155,7 @@ class DREAM:
                                                 top_p = None)
         else:
             raise ValueError(f"Invalid constraint mode: {self.constraint_mode}")
-        
-        return self.tokenizer.batch_decode(output[:, len(inputs.input_ids):], skip_special_tokens=True)[0]
+        return self.tokenizer.batch_decode(output_ids[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0]
     
 
     @torch.no_grad()
@@ -155,11 +166,11 @@ class DREAM:
         constraint_mode: str = 'original',
         **kwargs,
     ) -> Union[torch.LongTensor]:
-        
-        generation_config = DreamGenerationConfig(**GenerationConfig.from_model_config(self.model.config).to_dict())
+        kwargs['mask_token_id'] = self.tokenizer.mask_token_id
+        generation_config = self.model.generation_config
     
         # 1. Handle `generation_config` and kwargs that might update it, and validate the `.generate()` call
-        generation_config = self._prepare_generation_config(generation_config, **kwargs)
+        generation_config = self.model._prepare_generation_config(generation_config, **kwargs)
         generation_tokens_hook_func = kwargs.pop("generation_tokens_hook_func", lambda step, x, logits: x)
         generation_logits_hook_func = kwargs.pop("generation_logits_hook_func", lambda step, x, logits: logits)
 
@@ -176,7 +187,7 @@ class DREAM:
             input_ids_length=input_ids_length,
         )
 
-        self._validate_generated_length(generation_config, input_ids_length, has_default_max_length)
+        self.model._validate_generated_length(generation_config, input_ids_length, has_default_max_length)
         
         # 4. Check input_ids
         if not is_torchdynamo_compiling() and self.model.device.type != input_ids.device.type:
@@ -207,7 +218,7 @@ class DREAM:
         )
 
         
-        result = self._constrained_sample(
+        result = self.constrained_sample(
             input_ids,
             attention_mask=attention_mask,
             generation_config=generation_config,
@@ -274,6 +285,7 @@ class DREAM:
 
         # this allows user-defined token control of the intermediate steps
         x = generation_tokens_hook_func(None, x, None)
+        opp_stop = False
         for i in range(steps):
             mask_index = (x == mask_token_id)
             logits = self.model(x, attention_mask, tok_idx).logits
@@ -323,11 +335,21 @@ class DREAM:
             x = generation_tokens_hook_func(i, x, logits)
 
             if i >= self.constrain_at: 
-                decoded_gen = self.tokenizer.decode(x[0, input_ids.shape[1]:end_gen_idx], skip_special_tokens=True) 
+                target_idx = -1
+                if self.target_word is not None and self.phrase is not None:
+                    decoded_gen = self.tokenizer.decode(x[0, input_ids.shape[1]:end_gen_idx], skip_special_tokens=True)
+                    target_idx = find_target_after_phrase_str(decoded_gen, self.phrase, self.target_word)
+                    if target_idx != -1:
+                        decoded_gen = target_idx
+
+                    if self.opp_end_char is not None and not decoded_gen.endswith(self.opp_end_char) and (True or target_idx != -1):
+                        decoded_gen = decoded_gen + self.opp_end_char
+                else:
+                    decoded_gen = self.tokenizer.decode(x[0, input_ids.shape[1]:end_gen_idx], skip_special_tokens=True)
                 
                 
                 if constraint_mode == 'ar_constrained':
-                    if not self.ar_logits_processor.enable_oppurtunistic or not self.ar_logits_processor.validate(decoded_gen, is_final_block = True):
+                    if not self.dfa_store.enable_oppurtunistic or not self.dfa_store.validate(decoded_gen, is_final_block = True):
                         gen_ids = []                           # tokens we’ve accepted so far
                         ar_prefix = x[:, input_ids.shape[1]:start_gen_idx]
                         for j in range(start_gen_idx, end_gen_idx):
@@ -339,8 +361,8 @@ class DREAM:
                             )
                             
                             current_logits = logits[:, j:j+1, :]
-                            if not self.ar_logits_processor.is_valid(ar_x, current_logits.argmax(-1).squeeze(1)):
-                                current_logits = self.ar_logits_processor(ar_x, current_logits)
+                            if not self.dfa_store.is_valid_ar(ar_x, current_logits.argmax(-1).squeeze(1)):
+                                current_logits = self.dfa_store.ar_logits_process(ar_x, current_logits)
                             
                             next_token = current_logits.argmax(-1).squeeze(1)   # greedy; replace with sampler if desired
                             gen_ids.append(next_token)
@@ -352,7 +374,10 @@ class DREAM:
                         
                 elif constraint_mode == 'diffusion_constrained':
                     if self.dfa_store.enable_oppurtunistic and self.dfa_store.validate(decoded_gen, is_final_block = True):
-                        best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
+                        if target_idx != -1: 
+                            opp_stop = True 
+                        else:
+                            best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
                     else:
                         gen_log_probs = F.log_softmax(logits[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
                         

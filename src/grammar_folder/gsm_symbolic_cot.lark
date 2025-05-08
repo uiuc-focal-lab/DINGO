@@ -1,6 +1,6 @@
 start: cot
         
-cot: segment+ end
+cot: segment+ "."
 
 segment: char* delim_expr
 
@@ -22,6 +22,5 @@ operator: "+" | "-" | "//" | "/" | "%" | "*" | "**"
 
 letter: /[a-j]/
 number: /[0-9]{1,3}/
-char: /[ -\"$-;=?-~\n]+/
+char: /[ -;=?-~\n]+/
 space: " "
-end: ".#"

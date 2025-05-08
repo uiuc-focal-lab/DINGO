@@ -5,9 +5,7 @@ from .viterbi import viterbi_block, ViterbiGraph
 from transformers import AutoTokenizer, AutoModel 
 import sys
 import os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-from dfa import traverse_token_path
-
+from .gen_utils import find_target_after_phrase_str
 
 def add_gumbel_noise(logits, temperature):
     '''
@@ -45,8 +43,8 @@ def get_num_transfer_tokens(mask_index, steps):
 
 
 class LLADA: 
-    def __init__(self, model, tokenizer, constraint_mode = 'original', dfa_store = None, ar_logits_processor = None, steps = 128, gen_length = 128,
-                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30):
+    def __init__(self, model, tokenizer, constraint_mode = 'original', steps = 128, gen_length = 128,
+                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, stop_word = None, stop_phrase = None, opp_end_char = None):
         
         self.model = model 
         self.tokenizer = tokenizer 
@@ -58,16 +56,19 @@ class LLADA:
         self.cfg_scale = cfg_scale 
         self.remasking = remasking 
         self.mask_id = 126336
-        self.dfa_store = dfa_store
-        self.ar_logits_processor = ar_logits_processor
         self.constrain_at = constrain_at
-        if self.dfa_store is not None:
-            self.edge_src = self.dfa_store.edge_src.clone().to(self.model.device)
-            self.edge_dst = self.dfa_store.edge_dst.clone().to(self.model.device)
-            self.edge_tok = self.dfa_store.edge_tok.clone().to(self.model.device)
+        
+        self.target_word = stop_word
+        self.phrase = stop_phrase
+        self.opp_end_char = opp_end_char
 
-
-    def __call__(self, prompt):
+    def __call__(self, prompt, dfa_store):
+        if dfa_store is not None:
+            self.dfa_store = dfa_store
+            self.edge_src = self.dfa_store.edge_src
+            self.edge_dst = self.dfa_store.edge_dst
+            self.edge_tok = self.dfa_store.edge_tok
+        
         input_ids = self.tokenizer(prompt)['input_ids']
         input_ids = torch.tensor(input_ids).to(self.model.device).unsqueeze(0)
         
@@ -124,6 +125,7 @@ class LLADA:
             block_mask_index = (x[:, start_gen_idx:end_gen_idx] == self.mask_id)
             num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
 
+            opp_stop = False    
             for i in range(steps):
                 mask_index = (x == self.mask_id)
                 if self.cfg_scale > 0.:
@@ -159,14 +161,25 @@ class LLADA:
                     _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
                     transfer_index[j, select_index] = True
                 x[transfer_index] = x0[transfer_index]
-                # bob = [x0[0, q] for q in torch.where(transfer_index[0] == True)[0].tolist()]
-                # print(f'Iteration {i} ', bob, self.tokenizer.batch_decode(bob))
+
 
                 if i >= self.constrain_at:
-                    decoded_gen = self.tokenizer.decode(x[0, prompt.shape[1]:end_gen_idx], skip_special_tokens=True)
+                    target_idx = -1
+                    if self.target_word is not None and self.phrase is not None:
+                        decoded_gen = self.tokenizer.decode(x[0, prompt.shape[1]:end_gen_idx], skip_special_tokens=True)
+                        target_idx = find_target_after_phrase_str(decoded_gen, self.phrase, self.target_word)
+                        if target_idx != -1:
+                            decoded_gen = target_idx
+                        
+                        if self.opp_end_char is not None and not decoded_gen.endswith(self.opp_end_char) and (num_block == num_blocks - 1 or target_idx != -1):
+                            decoded_gen = decoded_gen + self.opp_end_char
+                    else:
+                        decoded_gen = self.tokenizer.decode(x[0, prompt.shape[1]:end_gen_idx], skip_special_tokens=True)
+                    
+                    
                     if constraint_mode == 'ar_constrained': 
-                        if not self.ar_logits_processor.enable_oppurtunistic or not self.ar_logits_processor.validate(decoded_gen, is_final_block = num_block == num_blocks - 1):
-                            gen_ids = []                           # tokens we’ve accepted so far
+                        if not self.dfa_store.enable_oppurtunistic or not self.dfa_store.validate(decoded_gen, is_final_block = num_block == num_blocks - 1):
+                            gen_ids = []                           # tokens we've accepted so far
                             ar_prefix = x[:, prompt.shape[1]:start_gen_idx]
                             
                             for j in range(start_gen_idx, end_gen_idx):
@@ -181,8 +194,8 @@ class LLADA:
                                 current_logits = logits_with_noise[:, j:j+1, :]
 
                                 # 3. optionally change them
-                                if not self.ar_logits_processor.is_valid(ar_x, current_logits.argmax(-1).squeeze(1)):
-                                    current_logits = self.ar_logits_processor(ar_x, current_logits)
+                                if not self.dfa_store.is_valid_ar(ar_x, current_logits.argmax(-1).squeeze(1)):
+                                    current_logits = self.dfa_store.ar_logits_process(ar_x, current_logits)
 
                                 # 4. sample / pick the token and store it
                                 next_token = current_logits.argmax(-1).squeeze(1)   # greedy; replace with sampler if desired
@@ -196,11 +209,13 @@ class LLADA:
                     
                     elif constraint_mode == 'diffusion_constrained': 
                         if self.dfa_store.enable_oppurtunistic and self.dfa_store.validate(decoded_gen, is_final_block = num_block == num_blocks - 1):
-                            best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
+                            if target_idx != -1: 
+                                opp_stop = True 
+                            else:
+                                best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
                         else:
                             gen_log_probs = F.log_softmax(logits_with_noise[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
                             
-
                             current_cost, selected_tokens, selected_sources = viterbi_block(
                                 self.edge_src,
                                 self.edge_dst,
@@ -224,6 +239,9 @@ class LLADA:
                             token_path.reverse()
                             x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
 
+            if opp_stop: 
+                return x
+            
             if constraint_mode == 'diffusion_constrained': 
                 cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
                 cost_vector[best_intermediate_state] = 0.0

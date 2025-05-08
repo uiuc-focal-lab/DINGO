@@ -1,153 +1,101 @@
-import unittest
-import time
-import interegular
-from syncode.mask_store.byte_fsm import ByteFSM
 from syncode.mask_store.byte_tokenizer import ByteTokenizer
-from transformers import AutoTokenizer
-from typing import Dict, Tuple, Set, Optional, Any
 import torch
 import os
-import pickle
 from pathlib import Path
 from grammar_folder.grammar_to_regex import lark_to_regex
 import rust_dfa
-from collections import defaultdict, deque
-from typing import Any, Set, Dict
-from syncode import SyncodeLogitsProcessor, Grammar
+from outlines_core.fsm.json_schema import build_regex_from_schema
+import hashlib
+import sys
+import dill
 
-def get_live_states(self) -> Set[Any]:
+
+def sha256_digest(s: str) -> str:
+    """Get the sha256 digest of a string
+
+    Supports the `usedforsecurity` argument for Python 3.9+ to allow running on
+    a FIPS-enabled system.
     """
-    Return the set of all states reachable from the initial state that can
-    eventually reach a final state.
-    """
-    # 1) Build reverse-transition graph so we can walk backwards from finals
-    rev: Dict[Any, Set[Any]] = defaultdict(set)
-    for src, trans in self.transitions.items():
-        for symbol, tgt in trans.items():
-            rev[tgt].add(src)
-
-    # 2) Find all states that can reach a final (backward BFS from finals)
-    live_states: Set[Any] = set(self.finals)
-    queue = deque(self.finals)
-    while queue:
-        s = queue.popleft()
-        for prev in rev.get(s, ()):
-            if prev not in live_states:
-                live_states.add(prev)
-                queue.append(prev)
-
-    # 3) From initial, collect all reachable states (forward BFS)
-    reachable: Set[Any] = set()
-    queue = deque([self.initial])
-    while queue:
-        s = queue.popleft()
-        if s in reachable:
-            continue
-        reachable.add(s)
-        for tgt in self.transitions.get(s, {}).values():
-            queue.append(tgt)
-
-    # 4) Intersection: states both reachable from initial and live
-    result = reachable & live_states
-
-    # (Optional) update cache so future islive() calls are faster
-    self._live_states_cache.update(result)
-
-    return result
-
-def compute_token_transitions(tokenizer, fsm):
-    """
-    Compute the state transitions for each token in the tokenizer vocabulary and each state in the FSM.
-    
-    Args:
-        tokenizer: An LLM tokenizer from Hugging Face Transformers
-        fsm: A ByteFSM instance
-        
-    Returns:
-        A dictionary mapping (state, token_id) -> next_state, indicating the state reached 
-        when starting from 'state' and processing a token with ID 'token_id'.
-    """
-    # Initialize the transition map
-    token_transitions = {}
-    
-    # Get all states in the FSM
-    states = set()
-    
-    # Add states from transition dictionary keys
-    states.update(fsm.transitions.keys())
-    
-    # Add states from transition dictionary values
-    for transitions_dict in fsm.transitions.values():
-        for byte, next_state in transitions_dict.items():
-            if next_state is not None:
-                states.add(next_state)
-    
-    # Add initial and final states
-    states.add(fsm.initial)
-    states.update(fsm.finals)
-    
-    # For each token ID and each state, compute the next state
-    # vocab = tokenizer.get_vocab()
-    from syncode.mask_store.byte_tokenizer import ByteTokenizer
-    byte_tokenizer = ByteTokenizer(tokenizer)
-    vocab = byte_tokenizer.byte_vocab
-        
-    for token_bytes, token_id in vocab.items():
-        for state in states:
-            # Start from the given state
-            current = state
-            
-            # Process each byte of the token
-            for byte in token_bytes:
-                current = fsm.get_next_state(current, byte)
-                if current is None:
-                    break
-            
-            # Store the resulting state
-            token_transitions[(state, token_id)] = current
-    
-    return token_transitions, states
-
-
-def build_transition_matrix(transitions_by_state, max_tokens_transition): 
-    max_key = -1
-    for state in transitions_by_state: 
-        for next_state in transitions_by_state[state]:  
-            max_key = max(max_key, state, next_state) 
-    
-    assert max_key >= 0
-    
-    transition_matrix = torch.zeros(max_key + 1, max_key + 1, max_tokens_transition, dtype=torch.long) - 1
-    for state, transitions in transitions_by_state.items():
-        for next_state, token_ids in transitions.items(): 
-            transition_matrix[state, next_state, :len(token_ids)] = torch.tensor(token_ids, dtype=torch.long)
-    
-    return transition_matrix
-
-
-def traverse_token_path(tokens, token_transitions, initial_state):
-    current_state = initial_state
-    for token in tokens:
-        current_state = token_transitions[(current_state, token)]
-        try:
-            assert current_state is not None, f'Invalid transition from {current_state} via {token}'
-        except:
-            import pdb; pdb.set_trace()
-    return current_state
-
-
-
-def build_augment_token_transitions(dfa, tokenizer, initial_state, final_states, token_transitions_path):
-    if os.path.exists(token_transitions_path):
-        with open(token_transitions_path, 'rb') as f:
-            token_transitions = pickle.load(f)
-        
-        all_states = set()
-        for (src_state, _), dst_state in token_transitions.items():
-            all_states.add(src_state)
-            if dst_state is not None:
-                all_states.add(dst_state)
+    if sys.version_info >= (3, 9):
+        return hashlib.sha256(s.encode('utf8'), usedforsecurity=False).hexdigest()
     else:
+        return hashlib.sha256(s.encode('utf8')).hexdigest()
+        
+
+class DFAMatrixStore:
+    def __init__(self, task_name, do_cot=False, enable_oppurtunistic=False):
+        self.task_name = task_name
+        self.suffix = 'cot' if do_cot else 'std'
+        self.enable_oppurtunistic = enable_oppurtunistic
+    
+    def get_tok_name(self, tokenizer):
+        if 'llada' in tokenizer.name_or_path.lower():
+            return 'llada'
+        elif 'dream' in tokenizer.name_or_path.lower():
+            return 'dream'
+        else:
+            raise ValueError(f"Tokenizer {tokenizer.name_or_path} not supported")
+    
+    @classmethod
+    def load_obj(cls, filename: str):
+        """
+        Load an instance of this class from a dill file.
+        Returns:
+            An object of type cls, reconstructed from the file.
+        """
+        with open(filename, 'rb') as f:
+            obj = dill.load(f)
+        # Optional: check that the loaded object is indeed an instance of cls
+        if not isinstance(obj, cls):
+            raise TypeError(f"Loaded object is not a {cls.__name__}")
+        return obj
+    
+    def load_regex_dfa(self, schema, grammar_string):
+        if schema is not None:
+            pattern = build_regex_from_schema(schema)
+        else:
+            pattern_dict = lark_to_regex(grammar_string)
+            pattern = pattern_dict['start']
+
+            self.grammar_hash = sha256_digest(grammar_string)
+
+        dfa = rust_dfa.RegexDFA()
+        dfa.initialize(pattern)
+        return dfa
+    
+    def load(self, schema, idx, tokenizer):
+        current_file_dir = os.path.dirname(os.path.abspath(__file__))
+        if schema is not None:
+            self.fpath = f'{current_file_dir}/dfa_store/{self.task_name}_schema{idx}_{self.get_tok_name(tokenizer)}.dill'
+            if os.path.exists(self.fpath):
+                old_obj = self.load_obj(self.fpath)
+                old_obj.dfa = self.load_regex_dfa(schema, None)
+                return old_obj, None
+            else:
+                return None, None
+
+        else:
+            self.fpath = f'{current_file_dir}/dfa_store/{self.task_name}_{self.suffix}_{self.get_tok_name(tokenizer)}.dill'
+            grammar_path = f'{current_file_dir}/grammar_folder/{self.task_name}_{self.suffix}.lark'
+            if os.path.exists(grammar_path):
+                with open(grammar_path, 'r') as f:
+                    grammar_string = f.read()
+                
+            else:
+                raise FileNotFoundError(f"Grammar not found at {grammar_path}")
+
+            if os.path.exists(self.fpath):
+                old_obj = self.load_obj(self.fpath) 
+                if old_obj.grammar_hash == sha256_digest(grammar_string): 
+                    old_obj.dfa = self.load_regex_dfa(None, grammar_string)
+                    return old_obj, grammar_string
+                else:
+                    os.remove(self.fpath)
+                    return None, grammar_string
+            else:
+                return None, grammar_string
+                
+    def build_augment_token_transitions(self, dfa, tokenizer, final_states):
         byte_tokenizer = ByteTokenizer(tokenizer)
         vocab = byte_tokenizer.byte_vocab
         dfa.compute_token_transitions(vocab)
@@ -169,133 +117,29 @@ def build_augment_token_transitions(dfa, tokenizer, initial_state, final_states,
             if dst_state is not None:
                 all_states.add(dst_state)
         
-    
-        
-        for state in all_states: 
-            token_transitions[(state, 126336)] = state  
-        
-        with open(token_transitions_path, 'wb') as f:
-            pickle.dump(token_transitions, f)
-        
-    return token_transitions, all_states
+        if 'llada' in tokenizer.name_or_path.lower():
+            for state in all_states: 
+                token_transitions[(state, 126336)] = state  
+        elif 'dream' in tokenizer.name_or_path.lower():
+            for state in all_states: 
+                token_transitions[(state, tokenizer.mask_token_id)] = state  
 
-
-class ARLogitsProcessor:
-    def __init__(self, task_name, do_cot, tokenizer, enable_oppurtunistic = False):
-        self.task_name = task_name
-        self.do_cot = do_cot
-        self.tokenizer = tokenizer 
-        self.suffix = 'cot' if do_cot else 'std'
-        self.enable_oppurtunistic = enable_oppurtunistic
-
-        current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        grammar_path = f'{current_file_dir}/grammar_folder/{self.task_name}_{self.suffix}.lark'
-        if os.path.exists(grammar_path):
-            with open(grammar_path, 'r') as f:
-                grammar_string = f.read()
-            pattern_dict = lark_to_regex(grammar_string)
-            pattern = pattern_dict['start']
+        return token_transitions, all_states
+    
+    def build(self, schema, idx, tokenizer):
+        new_obj, grammar_string = self.load(schema, idx, tokenizer)
+        if new_obj is not None:
+            return new_obj
         
-        else:
-            raise FileNotFoundError(f"Grammar not found at {grammar_path}")
+        dfa = self.load_regex_dfa(schema, grammar_string)
         
-        self.dfa = rust_dfa.RegexDFA()
-        self.dfa.initialize(pattern)
-        
-        current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        token_transitions_path = f'{current_file_dir}/token_transitions/{self.task_name}_{self.suffix}.pkl'
-        Path(token_transitions_path).parent.mkdir(parents=True, exist_ok=True)
-        initial_state = self.dfa.get_initial_state()
-        final_states = self.dfa.get_final_states()
-        self.token_transitions, all_states = build_augment_token_transitions(self.dfa, self.tokenizer, initial_state, final_states, token_transitions_path)
-    
-    def is_valid(self, input_ids, next_token_id):
-        ids_to_traverse = input_ids[0].tolist() + next_token_id.tolist() if not isinstance(next_token_id, int) else input_ids[0].tolist() + [next_token_id]
-        current_state = self.dfa.get_initial_state()
-        for token in ids_to_traverse:
-            current_state = self.token_transitions.get((current_state, token), None)
-            if current_state is None:
-                return False
-        return True
-    
-    def __call__(self, input_ids, scores):
-        #traverse each token in the vocabulary and check if the next token is valid and if is not then set the score to -inf
-        for token_id in range(scores.shape[2]):
-            if not self.is_valid(input_ids, token_id):
-                scores[:, :, token_id] = -float('inf')
-        return scores
-
-    def validate(self, code, is_final_block = False):
-        if self.enable_oppurtunistic:
-            if is_final_block:
-                return self.dfa.matches(code)
-            else:
-                return self.dfa.prefix_matches(code)
-        else:
-            return False
-        
-
-def load_ar_logits_processor(task_name, do_cot, tokenizer, enable_oppurtunistic = False):
-    # suffix = 'cot' if do_cot else 'std'
-    # #get current file directory
-    # current_file_dir = os.path.dirname(os.path.abspath(__file__))
-    # grammar_path = f'{current_file_dir}/grammar_folder/{task_name}_{suffix}.lark'
-    
-    # if os.path.exists(grammar_path):
-    #     with open(grammar_path, 'r') as f:
-    #         grammar_string = f.read()
-    # else:
-    #     raise FileNotFoundError(f"Grammar not found at {grammar_path}")
-    
-    # pattern_dict = lark_to_regex(grammar_string)
-    # pattern = pattern_dict['start']
-    
-    # grammar_string = f'start: /{pattern}/'
-    
-    # ar_logits_processor = SyncodeLogitsProcessor(Grammar(grammar_string), tokenizer, dev_mode = True)
-    
-    ar_logits_processor = ARLogitsProcessor(task_name, do_cot, tokenizer, enable_oppurtunistic)
-    
-    return ar_logits_processor
-        
-
-class DFAMatrixStore:
-    def __init__(self, task_name, do_cot=False, enable_oppurtunistic=False):
-        self.task_name = task_name
-        self.suffix = 'cot' if do_cot else 'std'
-        self.enable_oppurtunistic = enable_oppurtunistic
-        
-    
-    def build(self, tokenizer):
-        #get current file directory
-        current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        grammar_path = f'{current_file_dir}/grammar_folder/{self.task_name}_{self.suffix}.lark'
-        if os.path.exists(grammar_path):
-            with open(grammar_path, 'r') as f:
-                grammar_string = f.read()
-            pattern_dict = lark_to_regex(grammar_string)
-            pattern = pattern_dict['start']
-        
-        else:
-            raise FileNotFoundError(f"Grammar not found at {grammar_path}")
-        
-        dfa = rust_dfa.RegexDFA()
-        dfa.initialize(pattern)
         
         # Get initial state and final states using the new methods
         initial_state = dfa.get_initial_state()
         final_states = dfa.get_final_states()
 
-        current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        token_transitions_path = f'{current_file_dir}/token_transitions/{self.task_name}_{self.suffix}.pkl'
-        Path(token_transitions_path).parent.mkdir(parents=True, exist_ok=True) 
-        token_transitions, all_states = build_augment_token_transitions(dfa, tokenizer, initial_state, final_states, token_transitions_path)
-        
-        # Save the original DFA for validation if enabled
-        if self.enable_oppurtunistic:
-            self.validator = dfa
-        
-        
+        token_transitions, all_states = self.build_augment_token_transitions(dfa, tokenizer, final_states)
+
         # Create a mapping from original state IDs to consecutive integers
         self.state_mapping = {old_id: new_id for new_id, old_id in enumerate(sorted(all_states))}
         self.debug_state_mapping = {new_id: old_id for new_id, old_id in enumerate(sorted(all_states))}
@@ -315,7 +159,7 @@ class DFAMatrixStore:
         final_states = [self.state_mapping[fs] for fs in final_states]
         
         # Print mapping information
-        print(f"Remappestate_mappingd {len(all_states)} states to consecutive IDs from 0 to {len(all_states) - 1}")
+        print(f"Remapped {len(all_states)} states to consecutive IDs from 0 to {len(all_states) - 1}")
         num_states = len(all_states)
 
         # Group transitions by starting state and next state
@@ -354,13 +198,20 @@ class DFAMatrixStore:
         self.edge_tok      = edge_tok
         self.num_states    = num_states
         self.token_transitions = token_transitions
+        
+        Path(self.fpath).parent.mkdir(parents=True, exist_ok=True) 
+        with open(self.fpath, 'wb') as f:
+            dill.dump(self, f)
+        
+        self.dfa = dfa
+        return self
 
     def validate(self, code, is_final_block = False):
         if self.enable_oppurtunistic:
             if is_final_block:
-                return self.validator.matches(code)
+                return self.dfa.matches(code)
             else:
-                return self.validator.prefix_matches(code)
+                return self.dfa.prefix_matches(code)
         else:
             return False
 
@@ -372,3 +223,35 @@ class DFAMatrixStore:
             except:
                 import pdb; pdb.set_trace()
         return current_state
+
+    def is_valid_ar(self, input_ids, next_token_id):
+        ids_to_traverse = input_ids[0].tolist() + next_token_id.tolist() if not isinstance(next_token_id, int) else input_ids[0].tolist() + [next_token_id]
+        current_state = self.initial_state
+        for token in ids_to_traverse:
+            current_state = self.token_transitions.get((current_state, token), None)
+            if current_state is None:
+                return False
+        return True
+
+    def ar_logits_process(self, input_ids, scores):
+        #traverse each token in the vocabulary and check if the next token is valid and if is not then set the score to -inf
+        for token_id in range(scores.shape[2]):
+            if not self.is_valid_ar(input_ids, token_id):
+                scores[:, :, token_id] = -float('inf')
+        return scores
+
+
+def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device, enable_oppurtunistic = False):
+    if schema_key is None:
+        dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(None, None, tokenizer)
+        dfa_store.edge_src = dfa_store.edge_src.to(device)
+        dfa_store.edge_dst = dfa_store.edge_dst.to(device)
+        dfa_store.edge_tok = dfa_store.edge_tok.to(device)
+        return [dfa_store] * len(dataset)
+    else:
+        dfa_stores = []
+        for row in dataset:
+            schema = row[schema_key]
+            idx = row['idx']
+            dfa_stores.append(DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(schema, idx, tokenizer))
+        return dfa_stores
