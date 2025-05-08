@@ -313,12 +313,7 @@ class DFAMatrixStore:
 
     def is_valid_ar(self, input_ids, next_token_id):
         ids_to_traverse = input_ids[0].tolist() + next_token_id.tolist() if not isinstance(next_token_id, int) else input_ids[0].tolist() + [next_token_id]
-        current_state = self.initial_state
-        for token in ids_to_traverse:
-            current_state = self.token_transitions.get((current_state, token), None)
-            if current_state is None:
-                return False
-        return True
+        return self.check_is_reachable(ids_to_traverse)
 
     def ar_logits_process(self, input_ids, scores):
         #traverse each token in the vocabulary and check if the next token is valid and if is not then set the score to -inf
