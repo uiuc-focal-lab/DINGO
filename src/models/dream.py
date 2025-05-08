@@ -344,12 +344,14 @@ class DREAM:
 
                     if self.opp_end_char is not None and not decoded_gen.endswith(self.opp_end_char) and (True or target_idx != -1):
                         decoded_gen = decoded_gen + self.opp_end_char
+                    
+                    tokd_gen = self.tokenizer(decoded_gen).input_ids
                 else:
-                    decoded_gen = self.tokenizer.decode(x[0, input_ids.shape[1]:end_gen_idx], skip_special_tokens=True)
+                    tokd_gen = x[0, input_ids.shape[1]:end_gen_idx].tolist()
                 
                 
                 if constraint_mode == 'ar_constrained':
-                    if not self.dfa_store.enable_oppurtunistic or not self.dfa_store.validate(decoded_gen, is_final_block = True):
+                    if not self.dfa_store.enable_oppurtunistic or not self.dfa_store.check_is_reachable(tokd_gen, is_final_block = True):
                         gen_ids = []                           # tokens we’ve accepted so far
                         ar_prefix = x[:, input_ids.shape[1]:start_gen_idx]
                         for j in range(start_gen_idx, end_gen_idx):
@@ -373,11 +375,12 @@ class DREAM:
                             x[:, start_gen_idx:end_gen_idx] = torch.stack(gen_ids, dim=1)
                         
                 elif constraint_mode == 'diffusion_constrained':
-                    if self.dfa_store.enable_oppurtunistic and self.dfa_store.validate(decoded_gen, is_final_block = True):
+                    if self.dfa_store.enable_oppurtunistic and self.dfa_store.check_is_reachable(tokd_gen, is_final_block = True):
                         if target_idx != -1: 
                             opp_stop = True 
                         else:
-                            best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
+                            if i == steps - 1:
+                                best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
                     else:
                         gen_log_probs = F.log_softmax(logits[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
                         

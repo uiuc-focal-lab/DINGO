@@ -8,7 +8,7 @@ from outlines_core.fsm.json_schema import build_regex_from_schema
 import hashlib
 import sys
 import dill
-
+from collections import defaultdict
 
 def sha256_digest(s: str) -> str:
     """Get the sha256 digest of a string
@@ -117,6 +117,14 @@ class DFAMatrixStore:
             if dst_state is not None:
                 all_states.add(dst_state)
         
+        
+        if 'llada' in tokenizer.name_or_path.lower():
+            for state in all_states: 
+                token_transitions[(state, 126336)] = state  
+        elif 'dream' in tokenizer.name_or_path.lower():
+            for state in all_states: 
+                token_transitions[(state, tokenizer.mask_token_id)] = state  
+
         if 'llada' in tokenizer.name_or_path.lower():
             for state in all_states: 
                 token_transitions[(state, 126336)] = state  
@@ -125,6 +133,53 @@ class DFAMatrixStore:
                 token_transitions[(state, tokenizer.mask_token_id)] = state  
 
         return token_transitions, all_states
+
+    def build_sparse_edges(self, transitions_by_state: dict[int, dict[int, torch.Tensor]],
+                        mask_token_id: int):
+        """
+        Parameters
+        ----------
+        transitions_by_state
+            dict[src_state][dst_state] = 1-D LongTensor of *token IDs*
+            (no mask-token edges yet, negative numbers never appear).
+        mask_token_id
+            The single *[MASK]* token ID in your vocabulary.
+        Returns
+        -------
+        edge_src, edge_dst, edge_tok  (each 1-D LongTensor )
+        """
+
+        src, dst, tok = [], [], []
+
+        for q_src, dests in transitions_by_state.items():
+            for q_dst, tokens in dests.items():
+                # add all *real* token edges
+                n = len(tokens)
+                src.extend([q_src] * n)
+                dst.extend([q_dst] * n)
+                tok.extend(tokens)
+
+                # add exactly *one* mask-edge for this (src,dst) pair
+                src.append(q_src)
+                dst.append(q_dst)
+                tok.append(mask_token_id)
+
+        edge_triplets = torch.tensor(
+            list(zip(src, dst, tok)),          # shape [E,3] on CPU
+            dtype=torch.long
+        )
+
+        # ---------- deduplicate triplets (cost O(E log E)) ----------
+        edge_triplets = torch.unique(edge_triplets, dim=0)
+
+        # unpack
+        edge_src, edge_dst, edge_tok = edge_triplets.t().contiguous()
+        dst_order = torch.argsort(edge_dst)
+        edge_src = edge_src[dst_order]
+        edge_dst = edge_dst[dst_order]
+        edge_tok = edge_tok[dst_order]
+
+        return edge_src, edge_dst, edge_tok
     
     def build(self, schema, idx, tokenizer):
         new_obj, grammar_string = self.load(schema, idx, tokenizer)
@@ -172,24 +227,22 @@ class DFAMatrixStore:
                     transitions_by_state[state][next_state] = []
                 transitions_by_state[state][next_state].append(token_id)
         
+        if 'llada' in tokenizer.name_or_path.lower():
+            mask_id = 126336
+        elif 'dream' in tokenizer.name_or_path.lower():
+            mask_id = tokenizer.mask_token_id
+        else:
+            raise ValueError(f"Tokenizer {tokenizer.name_or_path} not supported")
 
-        edge_src, edge_dst, edge_tok = [], [], []
-        for src, dst_dict in transitions_by_state.items():
-            for dst, tok_ids in dst_dict.items():
-                edge_src.extend([src] * len(tok_ids))
-                edge_dst.extend([dst] * len(tok_ids))
-                edge_tok.extend(tok_ids)
+        edge_src, edge_dst, edge_tok = self.build_sparse_edges(transitions_by_state, mask_id)
 
-        edge_src = torch.tensor(edge_src, dtype=torch.long)  # [E]
-        edge_dst = torch.tensor(edge_dst, dtype=torch.long)  # [E]
-        edge_tok = torch.tensor(edge_tok, dtype=torch.long)  # [E]
-
-        # Optionally: sort by destination to improve scatter‑reduce locality
-        dst_order = torch.argsort(edge_dst)
-        edge_src = edge_src[dst_order]
-        edge_dst = edge_dst[dst_order]
-        edge_tok = edge_tok[dst_order]
-
+        # convert token transitions to NFA due to mask_id  
+        new_token_transitions = defaultdict(list)
+        for (src_state, token_id), dst_state in token_transitions.items():
+            new_token_transitions[(src_state, token_id)].append(dst_state)
+            new_token_transitions[(src_state, mask_id)].append(dst_state)
+            
+        token_transitions = dict(new_token_transitions)
         # ---------- save to the DFA store ---------------------------------
         self.initial_state = initial_state
         self.final_states  = sorted(final_states)
@@ -198,6 +251,7 @@ class DFAMatrixStore:
         self.edge_tok      = edge_tok
         self.num_states    = num_states
         self.token_transitions = token_transitions
+        self.decoded_mask_id = tokenizer.decode(mask_id)
         
         Path(self.fpath).parent.mkdir(parents=True, exist_ok=True) 
         with open(self.fpath, 'wb') as f:
@@ -206,12 +260,15 @@ class DFAMatrixStore:
         self.dfa = dfa
         return self
 
-    def validate(self, code, is_final_block = False):
+    def validate(self, code, is_final_block = False, last_step = False):
         if self.enable_oppurtunistic:
-            if is_final_block:
-                return self.dfa.matches(code)
+            if last_step:
+                if is_final_block:
+                    return self.dfa.matches(code)
+                else:
+                    return self.dfa.prefix_matches(code)
             else:
-                return self.dfa.prefix_matches(code)
+                prefixes = code.split(self.decoded_mask_id)
         else:
             return False
 
@@ -219,10 +276,40 @@ class DFAMatrixStore:
         current_state = initial_state
         for token in tokens:
             try:
-                current_state = self.token_transitions[(current_state, token)]
+                assert len(self.token_transitions[(current_state, token)]) == 1
+                current_state = self.token_transitions[(current_state, token)][0]
             except:
                 import pdb; pdb.set_trace()
         return current_state
+
+    def check_is_reachable(self, tokens, is_final_block = False):
+        """
+        Return True iff *at least one* path produced by `tokens` can take us
+        from `initial_state` to any state in `final_states`.
+
+        self.token_transitions is expected to map (state, token) -> list[int]
+        (an empty list or a missing key = no outgoing edges for that pair).
+        """
+        final_states = self.final_states if is_final_block else None
+        # start with the single initial state
+        current = {self.initial_state}
+
+        for token in tokens:
+            next_states = set()
+
+            for state in current:
+                for nxt in self.token_transitions.get((state, token), []):
+                    next_states.add(nxt)
+
+            if not next_states:
+                return False
+
+            current = next_states  
+            
+        if final_states is not None:
+            return not current.isdisjoint(final_states)
+        else:
+            return current is not None
 
     def is_valid_ar(self, input_ids, next_token_id):
         ids_to_traverse = input_ids[0].tolist() + next_token_id.tolist() if not isinstance(next_token_id, int) else input_ids[0].tolist() + [next_token_id]
