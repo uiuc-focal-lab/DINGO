@@ -112,6 +112,9 @@ class LLADA:
 
         assert self.steps % num_blocks == 0
         steps = self.steps // num_blocks
+        
+        if constraint_mode in ['diffusion_constrained', 'ar_constrained']:
+            assert self.constrain_at is not None
 
         if constraint_mode == 'diffusion_constrained': 
             num_states = self.dfa_store.num_states
@@ -163,7 +166,7 @@ class LLADA:
                 x[transfer_index] = x0[transfer_index]
 
 
-                if i >= self.constrain_at:
+                if self.constrain_at is not None and i >= self.constrain_at:
                     target_idx = -1
                     if self.target_word is not None and self.phrase is not None:
                         decoded_gen = self.tokenizer.decode(x[0, prompt.shape[1]:end_gen_idx], skip_special_tokens=True)

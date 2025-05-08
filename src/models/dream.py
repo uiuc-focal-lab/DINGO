@@ -271,6 +271,9 @@ class DREAM:
         max_length = generation_config.max_length
         mask_token_id = generation_config.mask_token_id
         steps_total = generation_config.steps
+        
+        if constraint_mode in ['diffusion_constrained', 'ar_constrained']:
+            assert self.constrain_at is not None
 
 
         histories = [] if (return_dict_in_generate and output_history) else None
@@ -375,7 +378,7 @@ class DREAM:
             # this allows user-defined token control of the intermediate steps
             x = generation_tokens_hook_func(i, x, logits)
 
-            if i >= self.constrain_at: 
+            if self.constrain_at is not None and i >= self.constrain_at: 
                 target_idx = -1
                 if self.target_word is not None and self.phrase is not None:
                     decoded_gen = self.tokenizer.decode(x[0, input_ids.shape[1]:end_gen_idx], skip_special_tokens=True)
@@ -445,7 +448,7 @@ class DREAM:
                             token_path.append(tok)
                             current_state = selected_sources[t][current_state].item() 
                         token_path.reverse()
-                        x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
+                        x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x.device)
 
             if histories is not None:
                 histories.append(x.clone())
