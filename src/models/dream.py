@@ -12,6 +12,32 @@ from transformers.utils import (
 from .viterbi import viterbi_block
 from .gen_utils import find_target_after_phrase, find_target_after_phrase_str
 
+
+def get_num_transfer_tokens(mask_index: torch.BoolTensor, steps: int) -> torch.LongTensor:
+    """
+    Pre-computes, for every batch element, how many tokens should be revealed at
+    each reverse step so that the **expected** number per step is constant.
+    Returned shape: [B, steps]
+    """
+    mask_num = mask_index.sum(dim=1, keepdim=True)                 # [B,1]
+    base      = mask_num // steps
+    remainder = mask_num %  steps
+
+    n = torch.zeros(mask_num.size(0), steps, device=mask_index.device,
+                    dtype=torch.long) + base                       # [B,steps]
+    for b in range(mask_num.size(0)):
+        n[b, : remainder[b]] += 1
+    return n
+
+def _active_block_mask(seq_len: int, block_slice: slice, device, batch):
+    """
+    Returns a [B,L] boolean tensor that is True exactly on the positions
+    belonging to block_slice.
+    """
+    m = torch.zeros(batch, seq_len, dtype=torch.bool, device=device)
+    m[:, block_slice] = True
+    return m
+
 class DreamGenerationConfig(GenerationConfig):
     def __init__(self, **kwargs):
         self.temperature: float = kwargs.pop("temperature", 0.0)
@@ -229,8 +255,7 @@ class DREAM:
 
         
         return result
-
-
+    
     def constrained_sample(
         self,
         input_ids: torch.LongTensor,
@@ -245,22 +270,19 @@ class DREAM:
         return_dict_in_generate = generation_config.return_dict_in_generate
         max_length = generation_config.max_length
         mask_token_id = generation_config.mask_token_id
-        steps = generation_config.steps
-        eps = generation_config.eps
-        alg = generation_config.alg
-        alg_temp = generation_config.alg_temp
-        temperature = generation_config.temperature
-        top_p = generation_config.top_p
-        top_k = generation_config.top_k
+        steps_total = generation_config.steps
+
 
         histories = [] if (return_dict_in_generate and output_history) else None
 
+        assert self.gen_length % self.block_length == 0, "max_length must be divisible by block_length"
+        num_blocks = self.gen_length // self.block_length
+        assert steps_total % num_blocks == 0, "steps must be divisible by num_blocks"
+        steps_per_block  = steps_total // num_blocks
+        
         # pad input_ids to max_length
         x = F.pad(input_ids, (0, max_length - input_ids.shape[1]), value=mask_token_id)
-        
-        start_gen_idx = input_ids.shape[1]
-        end_gen_idx = x.shape[1]
-        
+
         if constraint_mode == 'diffusion_constrained':
             num_states = self.dfa_store.num_states
             cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
@@ -280,56 +302,75 @@ class DREAM:
         else:
             tok_idx = None
             attention_mask = "full"
-
-        timesteps = torch.linspace(1, eps, steps + 1, device=x.device)
-
-        # this allows user-defined token control of the intermediate steps
-        x = generation_tokens_hook_func(None, x, None)
-        opp_stop = False
-        for i in range(steps):
-            mask_index = (x == mask_token_id)
-            logits = self.model(x, attention_mask, tok_idx).logits
-            logits = torch.cat([logits[:,:1], logits[:, :-1]], dim=1)
-
-            # this allows user-defined logits control of the intermediate steps
-            logits = generation_logits_hook_func(i, x, logits)
-            
-
-
-            mask_logits = logits[mask_index]
-            t = timesteps[i]
-            s = timesteps[i + 1]
         
-            if alg == 'origin':
-                p_transfer = 1 - s / t if i < steps - 1 else 1
-                x0 = torch.zeros_like(x[mask_index], device=self.model.device, dtype=torch.long) + mask_token_id
-                transfer_index_t_s = torch.rand(*x0.shape, device=self.model.device) < p_transfer
-                _, x0[transfer_index_t_s]= sample_tokens(mask_logits[transfer_index_t_s], temperature=temperature, top_p=top_p, top_k=top_k)
-                x[mask_index] = x0.clone()
-            else:
-                if alg == 'maskgit_plus':
-                    confidence, x0 = sample_tokens(mask_logits, temperature=temperature, top_p=top_p, top_k=top_k)
-                elif alg == 'topk_margin':
-                    confidence, x0 = sample_tokens(mask_logits, temperature=temperature, top_p=top_p, top_k=top_k, margin_confidence=True)
-                elif alg == 'entropy':
-                    confidence, x0 = sample_tokens(mask_logits, temperature, top_p=top_p, top_k=top_k, neg_entropy=True)
+        for num_block in range(num_blocks):
+            start_gen_idx = input_ids.shape[1] + num_block * self.block_length
+            end_gen_idx   = input_ids.shape[1] + (num_block + 1) * self.block_length
+
+            # pre-compute constant-expected-reveal schedule
+            block_mask_init = (x[:, start_gen_idx:end_gen_idx] == mask_token_id)
+            k_per_step = get_num_transfer_tokens(block_mask_init, steps_per_block)
+            
+            timesteps = torch.linspace(1, generation_config.eps,
+                                   steps_per_block + 1, device=x.device)
+            
+            active_block_mask = _active_block_mask(x.size(1), slice(start_gen_idx, end_gen_idx),
+                                               x.device, x.size(0))
+            
+            opp_stop = False
+            for i in range(steps_per_block):
+                mask_all   = (x == mask_token_id)
+                mask_block = mask_all & active_block_mask
+
+                logits = self.model(x, attention_mask, None).logits
+                logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
+                logits = generation_logits_hook_func(i, x, logits)
+
+                mask_logits = logits[mask_block]
+                
+                if generation_config.alg == "origin":
+                    p_t = 1 - timesteps[i+1] / timesteps[i] if i < steps_per_block-1 else 1
+                    rand_take = torch.rand(mask_logits.shape[0], device=x.device) < p_t
+                    _, new_ids = sample_tokens(mask_logits[rand_take],
+                                            temperature=generation_config.temperature,
+                                            top_p=generation_config.top_p,
+                                            top_k=generation_config.top_k)
+                    x_tmp = torch.full_like(mask_logits, mask_token_id, dtype=torch.long)
+                    x_tmp[rand_take] = new_ids
+                    x[mask_block] = x_tmp                              ### FIX restrict
                 else:
-                    raise RuntimeError(f"Unknown alg: {alg}")
-                num_mask_token = mask_index.sum() / mask_index.shape[0]
-                number_transfer_tokens = int(num_mask_token * (1 - s / t)) if i < steps - 1 else int(num_mask_token)
-                full_confidence = torch.full_like(x, -torch.inf, device=self.model.device, dtype=logits.dtype)
-                full_confidence[mask_index] = confidence
-                if number_transfer_tokens > 0:
-                    if alg_temp is None or alg_temp == 0:
-                        _, transfer_index = torch.topk(full_confidence, number_transfer_tokens)
-                    else:
-                        confidence = confidence / alg_temp
-                        confidence = F.softmax(confidence, dim=-1)
-                        transfer_index = torch.multinomial(full_confidence, num_samples=number_transfer_tokens)
-                    x_ = torch.zeros_like(x, device=self.model.device, dtype=torch.long) + mask_token_id
-                    x_[mask_index] = x0.clone()
-                    row_indices = torch.arange(x.size(0), device=self.model.device).unsqueeze(1).expand_as(transfer_index)
-                    x[row_indices,transfer_index] = x_[row_indices,transfer_index]
+                    kwargs = dict(
+                        temperature=generation_config.temperature,
+                        top_p=generation_config.top_p,
+                        top_k=generation_config.top_k,
+                        margin_confidence=(generation_config.alg == "topk_margin"),
+                        neg_entropy       =(generation_config.alg == "entropy"),
+                    )
+                    conf, new_ids = sample_tokens(mask_logits, **kwargs)
+
+                    # block-wide confidence tensor
+                    conf_full = torch.full_like(x, -torch.inf, dtype=logits.dtype)
+                    conf_full[mask_block] = conf
+                    # exclude *future* blocks
+                    conf_full[:, end_gen_idx:] = -torch.inf              ### FIX future leak
+
+                    # how many to reveal this step / batch
+                    transfer = torch.zeros_like(mask_block, dtype=torch.bool)
+                    for b_id in range(x.size(0)):
+                        k = int(k_per_step[b_id, i])
+                        if k == 0:
+                            continue
+                        k = min(k, mask_block[b_id].sum().item())       ### FIX corner
+                        if k == 0:
+                            continue
+                        _, top_idx = torch.topk(conf_full[b_id], k)
+                        transfer[b_id, top_idx] = True
+
+                    # write new ids
+                    x_write = torch.full_like(x, mask_token_id)
+                    x_write[mask_block] = new_ids
+                    x[transfer] = x_write[transfer]
+
 
             # this allows user-defined token control of the intermediate steps
             x = generation_tokens_hook_func(i, x, logits)
@@ -342,7 +383,7 @@ class DREAM:
                     if target_idx != -1:
                         decoded_gen = target_idx
 
-                    if self.opp_end_char is not None and not decoded_gen.endswith(self.opp_end_char) and (True or target_idx != -1):
+                    if self.opp_end_char is not None and not decoded_gen.endswith(self.opp_end_char) and (num_block == num_blocks - 1 or target_idx != -1):
                         decoded_gen = decoded_gen + self.opp_end_char
                     
                     tokd_gen = self.tokenizer(decoded_gen).input_ids
@@ -351,7 +392,7 @@ class DREAM:
                 
                 
                 if constraint_mode == 'ar_constrained':
-                    if not self.dfa_store.enable_oppurtunistic or not self.dfa_store.check_is_reachable(tokd_gen, is_final_block = True):
+                    if not self.dfa_store.enable_oppurtunistic or not self.dfa_store.check_is_reachable(tokd_gen, is_final_block = num_block == num_blocks - 1):
                         gen_ids = []                           # tokens we’ve accepted so far
                         ar_prefix = x[:, input_ids.shape[1]:start_gen_idx]
                         for j in range(start_gen_idx, end_gen_idx):
@@ -379,7 +420,7 @@ class DREAM:
                         if target_idx != -1: 
                             opp_stop = True 
                         else:
-                            if i == steps - 1:
+                            if i == steps_per_block - 1:
                                 best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
                     else:
                         gen_log_probs = F.log_softmax(logits[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
@@ -392,7 +433,10 @@ class DREAM:
                             cost_vector
                         )
                         
-                        best_intermediate_state = self.dfa_store.final_states[torch.argmax(current_cost[self.dfa_store.final_states])]
+                        if num_block == num_blocks - 1:
+                            best_intermediate_state = self.dfa_store.final_states[torch.argmax(current_cost[self.dfa_store.final_states])]
+                        else:
+                            best_intermediate_state = torch.argmax(current_cost)
                         
                         token_path = []
                         current_state = best_intermediate_state
@@ -406,6 +450,13 @@ class DREAM:
             if histories is not None:
                 histories.append(x.clone())
         
+        if opp_stop: 
+            return x
+        
+        if constraint_mode == 'diffusion_constrained': 
+            cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
+            cost_vector[best_intermediate_state] = 0.0
+
         return x
     
     
