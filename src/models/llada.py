@@ -169,7 +169,7 @@ class LLADA:
                 if self.constrain_at is not None and i >= self.constrain_at:
                     target_idx = -1
                     if self.target_word is not None and self.phrase is not None:
-                        decoded_gen = self.tokenizer.decode(x[0, prompt.shape[1]:end_gen_idx], skip_special_tokens=True)
+                        decoded_gen = self.tokenizer.decode(x[0, prompt.shape[1]:end_gen_idx])
                         target_idx = find_target_after_phrase_str(decoded_gen, self.phrase, self.target_word)
                         if target_idx != -1:
                             decoded_gen = target_idx

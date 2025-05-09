@@ -27,6 +27,7 @@ def parse_arguments():
     parser.add_argument('--dataset', type=str, help='Dataset name, e.g., "gsm8k" or "spider"')
     parser.add_argument('--start_idx', type=int, default=0, help='start index')
     parser.add_argument('--end_idx', type=int, default=-1, help='end index')
+    parser.add_argument('--debug_ids', type=str, default=None, help='debug ids')
     
     #results args
     parser.add_argument("--log_dir", type=str, default="logging", help="Directory to save logs")
@@ -85,7 +86,12 @@ def process_dataset_interactive(args):
     if args.end_idx == -1:
         args.end_idx = len(dataset)
     
-    dataset = dataset.select(range(args.start_idx, args.end_idx))
+    if args.debug_ids is not None: 
+        debug_ids = [int(i) for i in args.debug_ids.split(',')]
+        dataset = dataset.select(debug_ids)
+    else:
+        dataset = dataset.select(range(args.start_idx, args.end_idx))
+    
     if args.constraint_mode in ['diffusion_constrained', 'ar_constrained']:
         dfa_stores = build_for_dataset(dataset, schema_key, args.dataset, args.do_cot, llm.tokenizer, llm.model.device, args.enable_oppurtunistic)
     else:
@@ -151,7 +157,12 @@ def process_dataset_parallel(args):
     dataset, schema_key =  load_dataset_by_name(args.dataset)
     if args.end_idx == -1:
         args.end_idx = len(dataset)
-    dataset = dataset.select(range(args.start_idx, args.end_idx))
+    
+    if args.debug_ids is not None: 
+        debug_ids = [int(i) for i in args.debug_ids.split(',')]
+        dataset = dataset.select(debug_ids)
+    else:
+        dataset = dataset.select(range(args.start_idx, args.end_idx))
     
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code = True, cache_dir = os.environ['HF_CACHE'])
     dfa_stores = build_for_dataset(dataset, schema_key, args.dataset, args.do_cot, tokenizer, llm.model.device, args.enable_oppurtunistic)

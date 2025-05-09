@@ -51,10 +51,7 @@ class GSMSymbolicEvaluator(BaseEvaluator):
         if self.do_cot:
             llm_response = self.extract_question_trace(full_llm_response)
 
-            if not llm_response.endswith("."):
-                llm_response = llm_response + "."
-        if llm_response.endswith("\n."):
-            llm_response = llm_response.rstrip("\n.") + "."
+        llm_response = llm_response.rstrip("\n.")
         parses = self.dfa.matches(llm_response) if llm_response is not None else False
         if self.do_cot:
             completion = self.parse_completion_regex(llm_response)

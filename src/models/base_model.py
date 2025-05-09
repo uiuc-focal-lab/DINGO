@@ -7,7 +7,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 's
 
 def get_stop_word_phrase(task_name, model_name):
     if task_name == 'gsm_symbolic' and 'base' in model_name.lower():
-        return '>>', 'The final answer', '.'
+        return '>>', 'The final answer', None
     else:
         return None, None, None
 
