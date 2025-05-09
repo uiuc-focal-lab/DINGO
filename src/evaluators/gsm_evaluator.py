@@ -38,7 +38,7 @@ class GSMSymbolicEvaluator(BaseEvaluator):
             end_idx = response.find(">>", start_idx)
             if end_idx == -1:
                 return response
-            return response[:end_idx + len(">>") + 1]
+            return response[:end_idx + len(">>")]
         except:
             return response
 
