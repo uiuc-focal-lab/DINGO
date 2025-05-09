@@ -375,90 +375,90 @@ class DREAM:
                     x[transfer] = x_write[transfer]
 
 
-            # this allows user-defined token control of the intermediate steps
-            x = generation_tokens_hook_func(i, x, logits)
+                # this allows user-defined token control of the intermediate steps
+                x = generation_tokens_hook_func(i, x, logits)
 
-            if self.constrain_at is not None and i >= self.constrain_at: 
-                target_idx = -1
-                if self.target_word is not None and self.phrase is not None:
-                    decoded_gen = self.tokenizer.decode(x[0, input_ids.shape[1]:end_gen_idx], skip_special_tokens=True)
-                    target_idx = find_target_after_phrase_str(decoded_gen, self.phrase, self.target_word)
-                    if target_idx != -1:
-                        decoded_gen = target_idx
+                if self.constrain_at is not None and i >= self.constrain_at: 
+                    target_idx = -1
+                    if self.target_word is not None and self.phrase is not None:
+                        decoded_gen = self.tokenizer.decode(x[0, input_ids.shape[1]:end_gen_idx], skip_special_tokens=True)
+                        target_idx = find_target_after_phrase_str(decoded_gen, self.phrase, self.target_word)
+                        if target_idx != -1:
+                            decoded_gen = target_idx
 
-                    if self.opp_end_char is not None and not decoded_gen.endswith(self.opp_end_char) and (num_block == num_blocks - 1 or target_idx != -1):
-                        decoded_gen = decoded_gen + self.opp_end_char
+                        if self.opp_end_char is not None and not decoded_gen.endswith(self.opp_end_char) and (num_block == num_blocks - 1 or target_idx != -1):
+                            decoded_gen = decoded_gen + self.opp_end_char
+                        
+                        tokd_gen = self.tokenizer(decoded_gen).input_ids
+                    else:
+                        tokd_gen = x[0, input_ids.shape[1]:end_gen_idx].tolist()
                     
-                    tokd_gen = self.tokenizer(decoded_gen).input_ids
-                else:
-                    tokd_gen = x[0, input_ids.shape[1]:end_gen_idx].tolist()
-                
-                
-                if constraint_mode == 'ar_constrained':
-                    if not self.dfa_store.enable_oppurtunistic or not self.dfa_store.check_is_reachable(tokd_gen, is_final_block = num_block == num_blocks - 1):
-                        gen_ids = []                           # tokens we’ve accepted so far
-                        ar_prefix = x[:, input_ids.shape[1]:start_gen_idx]
-                        for j in range(start_gen_idx, end_gen_idx):
-                            # 1. context ids that the processor will see
-                            ar_x = torch.cat(
-                                [ar_prefix,  # frozen prefix
-                                torch.tensor(gen_ids, device=x.device).unsqueeze(0)],  # generated so far
-                                dim=1,
+                    
+                    if constraint_mode == 'ar_constrained':
+                        if not self.dfa_store.enable_oppurtunistic or not self.dfa_store.check_is_reachable(tokd_gen, is_final_block = num_block == num_blocks - 1):
+                            gen_ids = []                           # tokens we’ve accepted so far
+                            ar_prefix = x[:, input_ids.shape[1]:start_gen_idx]
+                            for j in range(start_gen_idx, end_gen_idx):
+                                # 1. context ids that the processor will see
+                                ar_x = torch.cat(
+                                    [ar_prefix,  # frozen prefix
+                                    torch.tensor(gen_ids, device=x.device).unsqueeze(0)],  # generated so far
+                                    dim=1,
+                                )
+                                
+                                current_logits = logits[:, j:j+1, :]
+                                if not self.dfa_store.is_valid_ar(ar_x, current_logits.argmax(-1).squeeze(1)):
+                                    current_logits = self.dfa_store.ar_logits_process(ar_x, current_logits)
+                                
+                                next_token = current_logits.argmax(-1).squeeze(1)   # greedy; replace with sampler if desired
+                                gen_ids.append(next_token)
+
+                                logits[:, j:j+1, :] = current_logits
+                            
+                            if gen_ids: 
+                                x[:, start_gen_idx:end_gen_idx] = torch.stack(gen_ids, dim=1)
+                            
+                    elif constraint_mode == 'diffusion_constrained':
+                        if self.dfa_store.enable_oppurtunistic and self.dfa_store.check_is_reachable(tokd_gen, is_final_block = num_block == num_blocks - 1):
+                            if target_idx != -1: 
+                                opp_stop = True 
+                            else:
+                                if i == steps_per_block - 1:
+                                    best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
+                        else:
+                            gen_log_probs = F.log_softmax(logits[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
+                            
+                            current_cost, selected_tokens, selected_sources = viterbi_block(
+                                self.edge_src,
+                                self.edge_dst,
+                                self.edge_tok,
+                                gen_log_probs,
+                                cost_vector
                             )
                             
-                            current_logits = logits[:, j:j+1, :]
-                            if not self.dfa_store.is_valid_ar(ar_x, current_logits.argmax(-1).squeeze(1)):
-                                current_logits = self.dfa_store.ar_logits_process(ar_x, current_logits)
+                            if num_block == num_blocks - 1:
+                                best_intermediate_state = self.dfa_store.final_states[torch.argmax(current_cost[self.dfa_store.final_states])]
+                            else:
+                                best_intermediate_state = torch.argmax(current_cost)
                             
-                            next_token = current_logits.argmax(-1).squeeze(1)   # greedy; replace with sampler if desired
-                            gen_ids.append(next_token)
+                            token_path = []
+                            current_state = best_intermediate_state
+                            for t in range(self.block_length - 1, - 1, -1):
+                                tok = selected_tokens[t][current_state].item()  
+                                token_path.append(tok)
+                                current_state = selected_sources[t][current_state].item() 
+                            token_path.reverse()
+                            x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x.device)
 
-                            logits[:, j:j+1, :] = current_logits
-                        
-                        if gen_ids: 
-                            x[:, start_gen_idx:end_gen_idx] = torch.stack(gen_ids, dim=1)
-                        
-                elif constraint_mode == 'diffusion_constrained':
-                    if self.dfa_store.enable_oppurtunistic and self.dfa_store.check_is_reachable(tokd_gen, is_final_block = True):
-                        if target_idx != -1: 
-                            opp_stop = True 
-                        else:
-                            if i == steps_per_block - 1:
-                                best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
-                    else:
-                        gen_log_probs = F.log_softmax(logits[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
-                        
-                        current_cost, selected_tokens, selected_sources = viterbi_block(
-                            self.edge_src,
-                            self.edge_dst,
-                            self.edge_tok,
-                            gen_log_probs,
-                            cost_vector
-                        )
-                        
-                        if num_block == num_blocks - 1:
-                            best_intermediate_state = self.dfa_store.final_states[torch.argmax(current_cost[self.dfa_store.final_states])]
-                        else:
-                            best_intermediate_state = torch.argmax(current_cost)
-                        
-                        token_path = []
-                        current_state = best_intermediate_state
-                        for t in range(self.block_length - 1, - 1, -1):
-                            tok = selected_tokens[t][current_state].item()  
-                            token_path.append(tok)
-                            current_state = selected_sources[t][current_state].item() 
-                        token_path.reverse()
-                        x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x.device)
-
-            if histories is not None:
-                histories.append(x.clone())
+                if histories is not None:
+                    histories.append(x.clone())
         
-        if opp_stop: 
-            return x
-        
-        if constraint_mode == 'diffusion_constrained': 
-            cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
-            cost_vector[best_intermediate_state] = 0.0
+            if opp_stop: 
+                return x
+            
+            if constraint_mode == 'diffusion_constrained': 
+                cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
+                cost_vector[best_intermediate_state] = 0.0
 
         return x
     

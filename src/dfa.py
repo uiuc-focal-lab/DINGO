@@ -252,6 +252,7 @@ class DFAMatrixStore:
         self.num_states    = num_states
         self.token_transitions = token_transitions
         self.decoded_mask_id = tokenizer.decode(mask_id)
+        self.eos_token_id = tokenizer.eos_token_id
         
         Path(self.fpath).parent.mkdir(parents=True, exist_ok=True) 
         with open(self.fpath, 'wb') as f:
