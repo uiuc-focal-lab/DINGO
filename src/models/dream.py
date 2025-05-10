@@ -167,6 +167,9 @@ class DREAM:
             self.edge_src = dfa_store.edge_src
             self.edge_dst = dfa_store.edge_dst
             self.edge_tok = dfa_store.edge_tok
+            self.edge_src_nomdm = self.dfa_store.edge_src_nomdm
+            self.edge_dst_nomdm = self.dfa_store.edge_dst_nomdm
+            self.edge_tok_nomdm = self.dfa_store.edge_tok_nomdm
         
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
         if self.constraint_mode in ['unconstrained', 'ar_constrained', 'diffusion_constrained']:
@@ -429,9 +432,9 @@ class DREAM:
                             gen_log_probs = F.log_softmax(logits[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
                             
                             current_cost, selected_tokens, selected_sources = viterbi_block(
-                                self.edge_src,
-                                self.edge_dst,
-                                self.edge_tok,
+                                self.edge_src if i != steps_per_block - 1 else self.edge_src_nomdm,
+                                self.edge_dst if i != steps_per_block - 1 else self.edge_dst_nomdm,
+                                self.edge_tok if i != steps_per_block - 1 else self.edge_tok_nomdm,
                                 gen_log_probs,
                                 cost_vector
                             )

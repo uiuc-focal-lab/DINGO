@@ -2,7 +2,7 @@
 from .base_evaluator import BaseEvaluator
 import ast
 import json
-from jsonschema import validate, ValidationError
+from jsonschema import validate, ValidationError, SchemaError
 
 
 
@@ -16,8 +16,8 @@ class JSONModeEvaluator(BaseEvaluator):
 
 
     def evaluate_answer(self, gen_output):
-        completion = gen_output['llm_response']
-        json_schema = gen_output['schema']
+        completion = gen_output['llm_response'].replace('```json', '').replace('```', '')
+        json_schema = json.loads(gen_output['schema'])
         
         
         parses = False 
@@ -55,15 +55,21 @@ class JSONModeEvaluator(BaseEvaluator):
                     error_type = "Validation Error"
                     correct = False
         
+        question = gen_output['prompt'][0]['content'] + '\n' + gen_output['prompt'][1]['content']
+        if not isinstance(error_message, str):
+            if hasattr(error_message, 'message'):
+                error_message = error_message.message
+            else:
+                error_message = str(error_message)
         results = {
-            'question': gen_output['question'],
+            'question': question,
             'gold_answer': gen_output['completion'],
-            'schema': json_schema,
+            'schema': gen_output['schema'],
             'correct': correct,
             'parses': parses,
             'error_type': error_type,
             'llm_response': completion,
-            'generated_json': generated_json,
+            'generated_json': str(generated_json),
             'error_message': error_message,
             'time': gen_output['response_info']['time'], 
         }

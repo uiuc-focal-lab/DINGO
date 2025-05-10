@@ -7,7 +7,7 @@ from typing import List, Tuple
 from ipaddress import IPv4Address, IPv6Address
 from jsonschema import Draft202012Validator, FormatChecker, SchemaError
 from typing import Dict, Any
-
+import json
 
 Schema = Dict[str, Any]
 
@@ -63,7 +63,7 @@ class SchemaBenchEvaluator(BaseEvaluator):
 
     def evaluate_answer(self, gen_output):
         completion = gen_output['llm_response']
-        json_schema = gen_output['json_schema']
+        json_schema = json.loads(gen_output['json_schema'])
         
         
         parses = True 
@@ -78,20 +78,26 @@ class SchemaBenchEvaluator(BaseEvaluator):
             error_message = e
             error_type = "JSON Decoding Error"
             parses = False
+            json_object = ''
             
         correct = parses
         if parses:
             correct, error_message, error_type = validate_json_schema(json_object, json_schema)
-                
+        
+        if not isinstance(error_message, str):
+            if hasattr(error_message, 'message'):
+                error_message = error_message.message
+            else:
+                error_message = str(error_message)
         
         results = {
             'question': gen_output['question'],
-            'schema': json_schema,
+            'schema': gen_output['json_schema'],
             'correct': correct,
             'parses': parses,
             'error_type': error_type,
             'llm_response': completion,
-            'generated_json': json_object,
+            'generated_json': str(json_object),
             'error_message': error_message,
             'time': gen_output['response_info']['time'], 
         }

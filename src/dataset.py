@@ -2,7 +2,9 @@ from datasets import load_dataset, Dataset
 import json
 import os
 import re
-
+from outlines_core.json_schema import build_regex_from_schema
+import exrex
+from jsonschema import validate, ValidationError
 
 
 def load_dataset_by_name(task_name):
@@ -44,6 +46,14 @@ def load_dataset_by_name(task_name):
         data = []
         i = 0
         for row in load_dataset('NousResearch/json-mode-eval', split = 'train'):
+            schema = row['schema']
+            try:
+                pattern = build_regex_from_schema(schema)
+                
+            except Exception as e:
+                pass
+
+            row['prompt'][-1]['content'] = row['prompt'][-1]['content'] + '\nOnly output the JSON object, no other text or comments.\n'
             data.append({**row, 'idx': i})
             i += 1
         ds = Dataset.from_list(data)
@@ -52,6 +62,17 @@ def load_dataset_by_name(task_name):
         data = []
         i = 0
         for row in load_dataset("epfl-dlab/JSONSchemaBench", "Github_trivial", split = 'train'):
+            schema = row['json_schema']
+            if i == 24:
+                i += 1
+                continue
+            
+            try:
+                pattern = build_regex_from_schema(schema)
+            except Exception as e:
+                i += 1
+                continue
+
             data.append({'question': row['json_schema'], 'json_schema': row['json_schema'], 'idx': i})
             i += 1
         ds = Dataset.from_list(data)

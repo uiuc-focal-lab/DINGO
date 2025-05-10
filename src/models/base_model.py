@@ -51,9 +51,14 @@ class BaseLM:
         
         schema = batch[self.schema_key] if self.schema_key is not None else None
         if schema is not None and dfa_store is not None:
-            dfa_store.edge_src = dfa_store.edge_src.to(self.model.device)
-            dfa_store.edge_dst = dfa_store.edge_dst.to(self.model.device)
-            dfa_store.edge_tok = dfa_store.edge_tok.to(self.model.device)
+            if self.generator.constrain_at < (self.generator.steps // (self.generator.gen_length // self.generator.block_length)) - 1:
+                dfa_store.edge_src = dfa_store.edge_src.to(self.model.device)
+                dfa_store.edge_dst = dfa_store.edge_dst.to(self.model.device)
+                dfa_store.edge_tok = dfa_store.edge_tok.to(self.model.device)
+            
+            dfa_store.edge_src_nomdm = dfa_store.edge_src_nomdm.to(self.model.device)
+            dfa_store.edge_dst_nomdm = dfa_store.edge_dst_nomdm.to(self.model.device)
+            dfa_store.edge_tok_nomdm = dfa_store.edge_tok_nomdm.to(self.model.device)
         
         if isinstance(prompt, list):
             prompt =  self.tokenizer.apply_chat_template(prompt, tokenize = False, add_generation_prompt = True)
@@ -64,9 +69,14 @@ class BaseLM:
         end_time = time.time()
         
         if schema is not None and dfa_store is not None: 
-            dfa_store.edge_src = dfa_store.edge_src.to('cpu')
-            dfa_store.edge_dst = dfa_store.edge_dst.to('cpu')
-            dfa_store.edge_tok = dfa_store.edge_tok.to('cpu')
+            if self.generator.constrain_at < (self.generator.steps // (self.generator.gen_length // self.generator.block_length)) - 1:
+                dfa_store.edge_src = dfa_store.edge_src.to('cpu')
+                dfa_store.edge_dst = dfa_store.edge_dst.to('cpu')
+                dfa_store.edge_tok = dfa_store.edge_tok.to('cpu')
+                
+            dfa_store.edge_src_nomdm = dfa_store.edge_src_nomdm.to('cpu')
+            dfa_store.edge_dst_nomdm = dfa_store.edge_dst_nomdm.to('cpu')
+            dfa_store.edge_tok_nomdm = dfa_store.edge_tok_nomdm.to('cpu')
         
         new_batch['llm_response'] = out
         new_batch['response_info'] = {'time': end_time - start_time}

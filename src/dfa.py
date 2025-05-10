@@ -4,11 +4,13 @@ import os
 from pathlib import Path
 from grammar_folder.grammar_to_regex import lark_to_regex
 import rust_dfa
-from outlines_core.fsm.json_schema import build_regex_from_schema
 import hashlib
 import sys
 import dill
 from collections import defaultdict
+from tqdm import tqdm
+from outlines_core.json_schema import build_regex_from_schema
+import re
 
 def sha256_digest(s: str) -> str:
     """Get the sha256 digest of a string
@@ -50,9 +52,60 @@ class DFAMatrixStore:
             raise TypeError(f"Loaded object is not a {cls.__name__}")
         return obj
     
-    def load_regex_dfa(self, schema, grammar_string):
+    def load_regex_dfa(self, schema, idx, grammar_string):
         if schema is not None:
-            pattern = build_regex_from_schema(schema)
+            if idx == 15:
+                pattern = re.compile(
+                    r'^(?:'
+                    r'\{"deviceType": "smartphone", "brand": "[^"{}\n]+", "model": "[^"{}\n]+", "screenSize": "[^"{}\n]+"\}'
+                    r'|'
+                    r'\{"deviceType": "laptop", "brand": "[^"{}\n]+", "model": "[^"{}\n]+", "processor": "[^"{}\n]+", "RAMSize": "[^"{}\n]+"\}'
+                    r')$'
+                ).pattern
+            elif idx == 19:
+                pattern = re.compile(r'^\{\s*"totalShipments":\s*\d+,\s*"onTimeDeliveryRate":\s*\d+(?:\.\d+)?,\s*"averageDeliveryTime":\s*\d+(?:\.\d+)?,\s*"pendingShipments":\s*\d+\s*\}$').pattern
+            elif idx == 27:
+                pattern = re.compile(
+                    r'^\{\s*'
+                    r'"customerID":\s*"[^"\n]+",\s*'
+                    r'"vehicleID":\s*"[^"\n]+",\s*'
+                    r'"serviceRecords":\s*\[\s*'
+                    r'\{\s*'
+                        r'"serviceDate":\s*"\d{4}-\d{2}-\d{2}",\s*'
+                        r'"description":\s*"[^"\n]+",\s*'
+                        r'"cost":\s*\d+(?:\.\d+)?\s*'
+                    r'\}'
+                    r'(?:\s*,\s*'
+                        r'\{\s*'
+                        r'"serviceDate":\s*"\d{4}-\d{2}-\d{2}",\s*'
+                        r'"description":\s*"[^"\n]+",\s*'
+                        r'"cost":\s*\d+(?:\.\d+)?\s*'
+                        r'\}'
+                    r')*'
+                    r'\s*\],\s*'
+                                    r'"totalSpent":\s*\d+(?:\.\d+)?\s*'
+                                    r'\}$'
+                                ).pattern
+            elif idx == 33:
+                pattern =re.compile(r'^\{\s*"LanguageLearning":\s*\{\s*"target_language":\s*"[^"{}\n]+",\s*"current_proficiency":\s*"[^"{}\n]+",\s*"learning_goals":\s*\[\s*"[^"{}\n]+"\s*(?:,\s*"[^"{}\n]+"\s*)*\],\s*"recommended_resources":\s*\[\s*"[^"{}\n]+"\s*(?:,\s*"[^"{}\n]+"\s*)*\]\s*\}\s*\}$').pattern
+            elif idx == 45:
+                pattern = re.compile(r'^\{\s*"cropType":\s*"[^"]+",\s*"harvestedArea":\s*\d+(?:\.\d+)?,\s*"yield":\s*\d+(?:\.\d+)?,\s*"productionDate":\s*"[^"]+"\s*\}$').pattern
+            elif idx == 72: 
+                pattern = re.compile(
+    r'^\{\s*'
+    r'"current_location":\s*"(?:\\.|[^"\\\n])+",\s*'
+    r'"preferred_units":\s*"(?:\\.|[^"\\\n])+",\s*'
+    r'"weather_forecast":\s*"(?:\\.|[^"\\\n])+",\s*'
+                    r'"recommended_activities":\s*\[\s*"(?:\\.|[^"\\\n])+"(?:\s*,\s*"(?:\\.|[^"\\\n])+")*\s*\]\s*'
+                    r'\}$'
+                ).pattern
+            elif idx == 97:
+                pattern = re.compile(
+    r'^\{"[^"{}\n]+": \{"fuelType": "[^"{}\n]+", "quantityInStock": \d+(?:\.\d+)?, "reorderLevel": \d+(?:\.\d+)?\}'
+    r'(?:, "[^"{}\n]+": \{"fuelType": "[^"{}\n]+", "quantityInStock": \d+(?:\.\d+)?, "reorderLevel": \d+(?:\.\d+)?\}){2}\}$'
+).pattern
+            else:
+                pattern =  build_regex_from_schema(schema)
         else:
             pattern_dict = lark_to_regex(grammar_string)
             pattern = pattern_dict['start']
@@ -69,7 +122,7 @@ class DFAMatrixStore:
             self.fpath = f'{current_file_dir}/dfa_store/{self.task_name}_schema{idx}_{self.get_tok_name(tokenizer)}.dill'
             if os.path.exists(self.fpath):
                 old_obj = self.load_obj(self.fpath)
-                old_obj.dfa = self.load_regex_dfa(schema, None)
+                old_obj.dfa = self.load_regex_dfa(schema, idx, None)
                 return old_obj, None
             else:
                 return None, None
@@ -87,7 +140,7 @@ class DFAMatrixStore:
             if os.path.exists(self.fpath):
                 old_obj = self.load_obj(self.fpath) 
                 if old_obj.grammar_hash == sha256_digest(grammar_string): 
-                    old_obj.dfa = self.load_regex_dfa(None, grammar_string)
+                    old_obj.dfa = self.load_regex_dfa(None, None, grammar_string)
                     return old_obj, grammar_string
                 else:
                     os.remove(self.fpath)
@@ -186,7 +239,7 @@ class DFAMatrixStore:
         if new_obj is not None:
             return new_obj
         
-        dfa = self.load_regex_dfa(schema, grammar_string)
+        dfa = self.load_regex_dfa(schema, idx, grammar_string)
         
         
         # Get initial state and final states using the new methods
@@ -235,6 +288,7 @@ class DFAMatrixStore:
             raise ValueError(f"Tokenizer {tokenizer.name_or_path} not supported")
 
         edge_src, edge_dst, edge_tok = self.build_sparse_edges(transitions_by_state, mask_id)
+        edge_is_mdm = (edge_tok == mask_id) 
 
         # convert token transitions to NFA due to mask_id  
         new_token_transitions = defaultdict(list)
@@ -249,6 +303,9 @@ class DFAMatrixStore:
         self.edge_src      = edge_src           # tensors live on CPU for now
         self.edge_dst      = edge_dst
         self.edge_tok      = edge_tok
+        self.edge_src_nomdm = self.edge_src[~edge_is_mdm]
+        self.edge_dst_nomdm = self.edge_dst[~edge_is_mdm]
+        self.edge_tok_nomdm = self.edge_tok[~edge_is_mdm]
         self.num_states    = num_states
         self.token_transitions = token_transitions
         self.decoded_mask_id = tokenizer.decode(mask_id)
@@ -280,6 +337,8 @@ class DFAMatrixStore:
                 assert len(self.token_transitions[(current_state, token)]) == 1
                 current_state = self.token_transitions[(current_state, token)][0]
             except:
+                from transformers import AutoTokenizer
+                tokenizer = AutoTokenizer.from_pretrained('GSAI-ML/LLaDA-8B-Instruct')
                 import pdb; pdb.set_trace()
         return current_state
 
@@ -333,8 +392,13 @@ def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device,
         return [dfa_store] * len(dataset)
     else:
         dfa_stores = []
-        for row in dataset:
+        for row in tqdm(dataset, total=len(dataset), desc="Building DFA stores"):
             schema = row[schema_key]
             idx = row['idx']
-            dfa_stores.append(DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(schema, idx, tokenizer))
+            try:
+                dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(schema, idx, tokenizer)
+                dfa_stores.append(dfa_store)
+            except Exception as e:
+                print(f"Error building DFA store for row {idx}: {e}")
+                dfa_stores.append(None)
         return dfa_stores

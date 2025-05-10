@@ -68,6 +68,9 @@ class LLADA:
             self.edge_src = self.dfa_store.edge_src
             self.edge_dst = self.dfa_store.edge_dst
             self.edge_tok = self.dfa_store.edge_tok
+            self.edge_src_nomdm = self.dfa_store.edge_src_nomdm
+            self.edge_dst_nomdm = self.dfa_store.edge_dst_nomdm
+            self.edge_tok_nomdm = self.dfa_store.edge_tok_nomdm
         
         input_ids = self.tokenizer(prompt)['input_ids']
         input_ids = torch.tensor(input_ids).to(self.model.device).unsqueeze(0)
@@ -211,7 +214,7 @@ class LLADA:
                             if gen_ids: 
                                 x[:, start_gen_idx:end_gen_idx] = torch.stack(gen_ids, dim=1)
                     
-                    elif constraint_mode == 'diffusion_constrained': 
+                    elif constraint_mode == 'diffusion_constrained':
                         if self.dfa_store.enable_oppurtunistic and self.dfa_store.check_is_reachable(tokd_gen, is_final_block = num_block == num_blocks - 1):
                             if target_idx != -1: 
                                 opp_stop = True 
@@ -220,11 +223,11 @@ class LLADA:
                                     best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
                         else:
                             gen_log_probs = F.log_softmax(logits_with_noise[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
-                            
+
                             current_cost, selected_tokens, selected_sources = viterbi_block(
-                                self.edge_src,
-                                self.edge_dst,
-                                self.edge_tok,
+                                self.edge_src if i != steps - 1 else self.edge_src_nomdm,
+                                self.edge_dst if i != steps - 1 else self.edge_dst_nomdm,
+                                self.edge_tok if i != steps - 1 else self.edge_tok_nomdm,
                                 gen_log_probs,
                                 cost_vector
                             )
@@ -243,6 +246,9 @@ class LLADA:
                                 current_state = selected_sources[t][current_state].item() 
                             token_path.reverse()
                             x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
+                            # if num_block == num_blocks - 1:
+                            #     import pdb;pdb.set_trace()
+                            # self.dfa_store.traverse_token_path(x[0, prompt.shape[1]:end_gen_idx].tolist(), self.dfa_store.initial_state)
 
             if opp_stop: 
                 return x

@@ -14,3 +14,4 @@ src/rust_dfa/target/
 src/cache/
 src/dfa_store/
 src/run_*.sh
+src/run_gsm_symbolic.sh
