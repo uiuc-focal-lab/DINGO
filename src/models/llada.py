@@ -201,8 +201,8 @@ class LLADA:
                                 current_logits = logits_with_noise[:, j:j+1, :]
 
                                 # 3. optionally change them
-                                if not self.dfa_store.is_valid_ar(ar_x, current_logits.argmax(-1).squeeze(1)):
-                                    current_logits = self.dfa_store.ar_logits_process(ar_x, current_logits)
+                                #if not self.dfa_store.is_valid_ar(ar_x, current_logits.argmax(-1).squeeze(1)):
+                                current_logits = self.dfa_store.ar_logits_process(ar_x, current_logits)
 
                                 # 4. sample / pick the token and store it
                                 next_token = current_logits.argmax(-1).squeeze(1)   # greedy; replace with sampler if desired

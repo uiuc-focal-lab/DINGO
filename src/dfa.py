@@ -11,6 +11,7 @@ from collections import defaultdict
 from tqdm import tqdm
 from outlines_core.json_schema import build_regex_from_schema
 import re
+from syncode import Grammar, SyncodeLogitsProcessor
 
 def sha256_digest(s: str) -> str:
     """Get the sha256 digest of a string
@@ -106,15 +107,18 @@ class DFAMatrixStore:
 ).pattern
             else:
                 pattern =  build_regex_from_schema(schema)
+            
+            syncode_grammar = Grammar(f"start: {pattern}")
         else:
             pattern_dict = lark_to_regex(grammar_string)
             pattern = pattern_dict['start']
 
             self.grammar_hash = sha256_digest(grammar_string)
+            syncode_grammar = Grammar(grammar_string)
 
         dfa = rust_dfa.RegexDFA()
         dfa.initialize(pattern)
-        return dfa
+        return dfa, syncode_grammar
     
     def load(self, schema, idx, tokenizer):
         current_file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -122,7 +126,7 @@ class DFAMatrixStore:
             self.fpath = f'{current_file_dir}/dfa_store/{self.task_name}_schema{idx}_{self.get_tok_name(tokenizer)}.dill'
             if os.path.exists(self.fpath):
                 old_obj = self.load_obj(self.fpath)
-                old_obj.dfa = self.load_regex_dfa(schema, idx, None)
+                old_obj.dfa, syncode_grammar = self.load_regex_dfa(schema, idx, None)
                 return old_obj, None
             else:
                 return None, None
@@ -140,7 +144,7 @@ class DFAMatrixStore:
             if os.path.exists(self.fpath):
                 old_obj = self.load_obj(self.fpath) 
                 if old_obj.grammar_hash == sha256_digest(grammar_string): 
-                    old_obj.dfa = self.load_regex_dfa(None, None, grammar_string)
+                    old_obj.dfa, syncode_grammar = self.load_regex_dfa(None, None, grammar_string)
                     return old_obj, grammar_string
                 else:
                     os.remove(self.fpath)
@@ -239,8 +243,8 @@ class DFAMatrixStore:
         if new_obj is not None:
             return new_obj
         
-        dfa = self.load_regex_dfa(schema, idx, grammar_string)
-        
+        dfa, syncode_grammar = self.load_regex_dfa(schema, idx, grammar_string)
+        self.syncode_logits_processor = SyncodeLogitsProcessor(syncode_grammar, tokenizer=tokenizer)
         
         # Get initial state and final states using the new methods
         initial_state = dfa.get_initial_state()
@@ -377,9 +381,10 @@ class DFAMatrixStore:
 
     def ar_logits_process(self, input_ids, scores):
         #traverse each token in the vocabulary and check if the next token is valid and if is not then set the score to -inf
-        for token_id in range(scores.shape[2]):
-            if not self.is_valid_ar(input_ids, token_id):
-                scores[:, :, token_id] = -float('inf')
+        # for token_id in range(scores.shape[2]):
+        #     if not self.is_valid_ar(input_ids, token_id):
+        #         scores[:, :, token_id] = -float('inf')
+        scores = self.syncode_logits_processor(input_ids, scores)
         return scores
 
 
@@ -389,6 +394,9 @@ def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device,
         dfa_store.edge_src = dfa_store.edge_src.to(device)
         dfa_store.edge_dst = dfa_store.edge_dst.to(device)
         dfa_store.edge_tok = dfa_store.edge_tok.to(device)
+        dfa_store.edge_src_nomdm = dfa_store.edge_src_nomdm.to(device)
+        dfa_store.edge_dst_nomdm = dfa_store.edge_dst_nomdm.to(device)
+        dfa_store.edge_tok_nomdm = dfa_store.edge_tok_nomdm.to(device)
         return [dfa_store] * len(dataset)
     else:
         dfa_stores = []
