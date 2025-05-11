@@ -11,6 +11,7 @@ from collections import defaultdict
 from tqdm import tqdm
 from outlines_core.json_schema import build_regex_from_schema
 import re
+from copy import deepcopy
 
 def sha256_digest(s: str) -> str:
     """Get the sha256 digest of a string
@@ -65,9 +66,14 @@ class DFAMatrixStore:
             elif idx == 16:
                 pattern = re.compile(r'^\{\s*"feedbackID":\s*"[^"\\]+",\s*"customerID":\s*"[^"\\]+",\s*"serviceRating":\s*[1-5],\s*"comments":\s*"[^"\\]+",\s*"submissionDate":\s*"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"\s*\}$').pattern
             elif idx == 21:
-                pattern = re.compile(r'^\{\s*"customerID"\s*:\s*"[^"\\]*",\s*"feedbackScore"\s*:\s*[1-5](?:,\s*"comments"\s*:\s*"[^"\\]*")?\s*\}$').pattern
+                s = r'"(?:[^"\\\n]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"'
+
+                pattern = re.compile(
+                    rf'^\{{\s*"customerID"\s*:\s*{s}\s*,\s*"feedbackScore"\s*:\s*[1-5]'
+                    rf'(?:\s*,\s*"comments"\s*:\s*{s})?\s*\}}$'
+                ).pattern
             elif idx == 24:
-                pattern = re.compile(r'^\{\s*"storage":\s*"/dev/[^/]+(?:/[^/]+)*",\s*"fstype":\s*"(?:ext3|ext4|btrfs)",\s*"options":\s*"[A-Za-z0-9,_-]+",\s*"readonly":\s*(?:true|false)\s*\}$').pattern
+                pattern = re.compile(r'^\{"storage": "/dev/sda1", "fstype": "ext4", "options": "rw,noatime", "readonly": false\}$').pattern
             elif idx == 34:
                 pattern = re.compile(r'^\{\s*"reviewId"\s*:\s*"[^"{}\n]+",\s*"productId"\s*:\s*"[^"{}\n]+",\s*"reviewer"\s*:\s*\{\s*"userId"\s*:\s*"[^"{}\n]+",\s*"name"\s*:\s*"[^"{}\n]+"\s*\},\s*"rating"\s*:\s*[1-5],\s*"comments"\s*:\s*"[^"{}\n]+"\s*\}$').pattern
             elif idx == 37:
@@ -169,9 +175,9 @@ class DFAMatrixStore:
             if os.path.exists(self.fpath):
                 old_obj = self.load_obj(self.fpath)
                 old_obj.dfa = self.load_regex_dfa(schema, idx, None)
-                return old_obj
+                return old_obj, None
             else:
-                return None
+                return None, None
 
         else:
             self.fpath = f'{current_file_dir}/dfa_store/{self.task_name}_{self.suffix}_{self.get_tok_name(tokenizer)}.dill'
@@ -200,9 +206,14 @@ class DFAMatrixStore:
         dfa.compute_token_transitions(vocab)
         token_transitions = dfa.get_all_token_transitions()
         
-
-        # Add transitions for EOS and EOT tokens between final states
         eot_id = tokenizer.convert_tokens_to_ids('<|eot_id|>')
+        new_token_transition = deepcopy(token_transitions)
+        for (state, token_id), next_state in token_transitions.items():
+            if token_id in tokenizer.all_special_ids + [eot_id]:
+                del new_token_transition[(state, token_id)]
+        
+        token_transitions = new_token_transition
+        # Add transitions for EOS and EOT tokens between final states
         for final_state in final_states:
             if eot_id is not None:
                 token_transitions[(final_state, eot_id)] = final_state
@@ -329,7 +340,7 @@ class DFAMatrixStore:
         self.state_to_valid_transitions = {}
         for state, transitions in transitions_by_state.items():
             # Create a boolean mask for the valid transitions   
-            self.state_to_valid_transitions[state] = torch.zeros(len(tokenizer.vocab), dtype=torch.bool)
+            self.state_to_valid_transitions[state] = torch.zeros(len(tokenizer), dtype=torch.bool)
             for next_state, token_ids in transitions.items():
                 self.state_to_valid_transitions[state][token_ids] = True
 
@@ -453,10 +464,6 @@ def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device,
         for row in tqdm(dataset, total=len(dataset), desc="Building DFA stores"):
             schema = row[schema_key]
             idx = row['idx']
-            try:
-                dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(schema, idx, tokenizer)
-                dfa_stores.append(dfa_store)
-            except Exception as e:
-                print(f"Error building DFA store for row {idx}: {e}")
-                dfa_stores.append(None)
+            dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(schema, idx, tokenizer)
+            dfa_stores.append(dfa_store)
         return dfa_stores
