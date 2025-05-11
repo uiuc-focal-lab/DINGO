@@ -16,4 +16,4 @@ z3-solver
 ray
 maturin
 srsly
-outlines_core==0.1.26
+outlines_core==0.2.9
