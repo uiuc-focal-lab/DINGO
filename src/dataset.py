@@ -3,7 +3,6 @@ import json
 import os
 import re
 from outlines_core.json_schema import build_regex_from_schema
-import exrex
 from jsonschema import validate, ValidationError
 
 

@@ -11,7 +11,6 @@ from collections import defaultdict
 from tqdm import tqdm
 from outlines_core.json_schema import build_regex_from_schema
 import re
-from syncode import Grammar, SyncodeLogitsProcessor
 
 def sha256_digest(s: str) -> str:
     """Get the sha256 digest of a string
@@ -153,17 +152,15 @@ class DFAMatrixStore:
             else:
                 pattern =  build_regex_from_schema(schema)
             
-            syncode_grammar = Grammar(f"start: {pattern}")
         else:
             pattern_dict = lark_to_regex(grammar_string)
             pattern = pattern_dict['start']
 
             self.grammar_hash = sha256_digest(grammar_string)
-            syncode_grammar = Grammar(grammar_string)
 
         dfa = rust_dfa.RegexDFA()
         dfa.initialize(pattern)
-        return dfa, syncode_grammar
+        return dfa
     
     def load(self, schema, idx, tokenizer):
         current_file_dir = os.path.dirname(os.path.abspath(__file__))
@@ -171,10 +168,10 @@ class DFAMatrixStore:
             self.fpath = f'{current_file_dir}/dfa_store/{self.task_name}_schema{idx}_{self.get_tok_name(tokenizer)}.dill'
             if os.path.exists(self.fpath):
                 old_obj = self.load_obj(self.fpath)
-                old_obj.dfa, syncode_grammar = self.load_regex_dfa(schema, idx, None)
-                return old_obj, None
+                old_obj.dfa = self.load_regex_dfa(schema, idx, None)
+                return old_obj
             else:
-                return None, None
+                return None
 
         else:
             self.fpath = f'{current_file_dir}/dfa_store/{self.task_name}_{self.suffix}_{self.get_tok_name(tokenizer)}.dill'
@@ -189,8 +186,8 @@ class DFAMatrixStore:
             if os.path.exists(self.fpath):
                 old_obj = self.load_obj(self.fpath) 
                 if old_obj.grammar_hash == sha256_digest(grammar_string): 
-                    old_obj.dfa, syncode_grammar = self.load_regex_dfa(None, None, grammar_string)
-                    return old_obj, grammar_string
+                    old_obj.dfa = self.load_regex_dfa(None, None, grammar_string)
+                    return old_obj, grammar_string  
                 else:
                     os.remove(self.fpath)
                     return None, grammar_string
@@ -288,8 +285,7 @@ class DFAMatrixStore:
         if new_obj is not None:
             return new_obj
         
-        dfa, syncode_grammar = self.load_regex_dfa(schema, idx, grammar_string)
-        self.syncode_logits_processor = SyncodeLogitsProcessor(syncode_grammar, tokenizer=tokenizer)
+        dfa = self.load_regex_dfa(schema, idx, grammar_string)
         
         # Get initial state and final states using the new methods
         initial_state = dfa.get_initial_state()
@@ -329,6 +325,11 @@ class DFAMatrixStore:
                     transitions_by_state[state][next_state] = []
                 transitions_by_state[state][next_state].append(token_id)
         
+        # For each state, store the tokens that can be used to transition to any valid next state
+        self.state_to_valid_transitions = {}
+        for state, transitions in transitions_by_state.items():
+            self.state_to_valid_transitions[state] = set(sum(transitions.values(), [])) 
+
         if 'llada' in tokenizer.name_or_path.lower():
             mask_id = 126336
         elif 'dream' in tokenizer.name_or_path.lower():
@@ -425,11 +426,13 @@ class DFAMatrixStore:
         return self.check_is_reachable(ids_to_traverse)
 
     def ar_logits_process(self, input_ids, scores):
-        #traverse each token in the vocabulary and check if the next token is valid and if is not then set the score to -inf
-        # for token_id in range(scores.shape[2]):
-        #     if not self.is_valid_ar(input_ids, token_id):
-        #         scores[:, :, token_id] = -float('inf')
-        scores = self.syncode_logits_processor(input_ids, scores)
+        # Use self.state_to_valid_transitions to set the scores to -inf for invalid transitions
+        current_state = self.traverse_token_path(input_ids[0].tolist(), self.initial_state)
+        valid_transitions = self.state_to_valid_transitions[current_state]
+        for token_id in range(scores.shape[2]):
+            if token_id not in valid_transitions:
+                scores[:, :, token_id] = -float('inf')
+
         return scores
 
 
