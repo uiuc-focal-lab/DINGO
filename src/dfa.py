@@ -328,7 +328,10 @@ class DFAMatrixStore:
         # For each state, store the tokens that can be used to transition to any valid next state
         self.state_to_valid_transitions = {}
         for state, transitions in transitions_by_state.items():
-            self.state_to_valid_transitions[state] = set(sum(transitions.values(), [])) 
+            # Create a boolean mask for the valid transitions   
+            self.state_to_valid_transitions[state] = torch.zeros(len(tokenizer.vocab), dtype=torch.bool)
+            for next_state, token_ids in transitions.items():
+                self.state_to_valid_transitions[state][token_ids] = True
 
         if 'llada' in tokenizer.name_or_path.lower():
             mask_id = 126336
@@ -421,18 +424,17 @@ class DFAMatrixStore:
         else:
             return current is not None
 
-    def is_valid_ar(self, input_ids, next_token_id):
-        ids_to_traverse = input_ids[0].tolist() + next_token_id.tolist() if not isinstance(next_token_id, int) else input_ids[0].tolist() + [next_token_id]
-        return self.check_is_reachable(ids_to_traverse)
 
     def ar_logits_process(self, input_ids, scores):
         # Use self.state_to_valid_transitions to set the scores to -inf for invalid transitions
         current_state = self.traverse_token_path(input_ids[0].tolist(), self.initial_state)
-        valid_transitions = self.state_to_valid_transitions[current_state]
-        for token_id in range(scores.shape[2]):
-            if token_id not in valid_transitions:
-                scores[:, :, token_id] = -float('inf')
+        accept_mask = self.state_to_valid_transitions[current_state]
+        
+        if len(accept_mask) < scores.shape[2]:
+            # pad the accept_mask with False
+            accept_mask = torch.cat([accept_mask, torch.zeros(scores.shape[2] - len(accept_mask), dtype=torch.bool)])
 
+        scores[:, :, ~accept_mask] = -float('inf')
         return scores
 
 
