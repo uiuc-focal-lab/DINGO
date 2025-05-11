@@ -63,6 +63,51 @@ class DFAMatrixStore:
                     r'\{"deviceType": "laptop", "brand": "[^"{}\n]+", "model": "[^"{}\n]+", "processor": "[^"{}\n]+", "RAMSize": "[^"{}\n]+"\}'
                     r')$'
                 ).pattern
+            elif idx == 16:
+                pattern = re.compile(r'^\{\s*"feedbackID":\s*"[^"\\]+",\s*"customerID":\s*"[^"\\]+",\s*"serviceRating":\s*[1-5],\s*"comments":\s*"[^"\\]+",\s*"submissionDate":\s*"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"\s*\}$').pattern
+            elif idx == 21:
+                pattern = re.compile(r'^\{\s*"customerID"\s*:\s*"[^"\\]*",\s*"feedbackScore"\s*:\s*[1-5](?:,\s*"comments"\s*:\s*"[^"\\]*")?\s*\}$').pattern
+            elif idx == 24:
+                pattern = re.compile(r'^\{\s*"storage":\s*"/dev/[^/]+(?:/[^/]+)*",\s*"fstype":\s*"(?:ext3|ext4|btrfs)",\s*"options":\s*"[A-Za-z0-9,_-]+",\s*"readonly":\s*(?:true|false)\s*\}$').pattern
+            elif idx == 34:
+                pattern = re.compile(r'^\{\s*"reviewId"\s*:\s*"[^"{}\n]+",\s*"productId"\s*:\s*"[^"{}\n]+",\s*"reviewer"\s*:\s*\{\s*"userId"\s*:\s*"[^"{}\n]+",\s*"name"\s*:\s*"[^"{}\n]+"\s*\},\s*"rating"\s*:\s*[1-5],\s*"comments"\s*:\s*"[^"{}\n]+"\s*\}$').pattern
+            elif idx == 37:
+                pattern = re.compile(
+                    r'^(?:'
+                    r'\{\s*"isMember":\s*true,\s*"membershipNumber":\s*"[^"]{10}"\s*\}'
+                    r'|'
+                    r'\{\s*"isMember":\s*false,\s*"membershipNumber":\s*"[^"]{15,}"\s*\}'
+                    r')$'
+                ).pattern
+            elif idx == 45:
+                pattern = re.compile(r'^\{\s*"cropType":\s*"[^"\n]+",\s*"harvestedArea":\s*\d+(?:\.\d+)?,\s*"yield":\s*\d+(?:\.\d+)?,\s*"productionDate":\s*"[^"\n]+"\s*\}$').pattern
+            elif idx == 58:
+                pattern = re.compile(
+    r'^\{\s*"distributorID":\s*"[^"{}\n]+",\s*'
+     r'"companyName":\s*"[^"{}\n]+",\s*'
+     r'"contactInfo":\s*\{\s*'
+       r'"phone":\s*"[^"{}\n]+",\s*'
+       r'"email":\s*"[^"{}\n]+",\s*'
+       r'"address":\s*"[^"{}\n]+"\s*'
+     r'\},\s*'
+     r'"productCategories":\s*\[\s*'
+       r'"[^"{}\n]+"(?:\s*,\s*"[^"{}\n]+")*\s*'
+                    r'\]\s*\}$'
+                ).pattern
+            elif idx == 63:
+                pattern = re.compile(
+    r'^\{\s*'
+      r'"feedbackID":\s*"[^"\\\n]+",\s*'
+      r'"customerID":\s*"[^"\\\n]+",\s*'
+      r'"productID":\s*"[^"\\\n]+",\s*'
+      r'"rating":\s*[1-5]'
+                    r'(?:,\s*"comments":\s*"[^"\\\n]+")?'
+                    r'\s*\}$'
+                ).pattern
+
+
+                
+
             elif idx == 19:
                 pattern = re.compile(r'^\{\s*"totalShipments":\s*\d+,\s*"onTimeDeliveryRate":\s*\d+(?:\.\d+)?,\s*"averageDeliveryTime":\s*\d+(?:\.\d+)?,\s*"pendingShipments":\s*\d+\s*\}$').pattern
             elif idx == 27:
