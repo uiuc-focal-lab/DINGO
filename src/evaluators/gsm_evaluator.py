@@ -219,7 +219,18 @@ def validate_expression_equivalence(expr1, expr2, var_types):
         return test_expression_equivalence(original_expr1, original_expr2, var_names, var_types)
     
     print('added constraints')
-    result = s.check()
+    
+    # Apply an external timeout of 2 minutes (120 seconds) to the s.check() call
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(120)  # 120 seconds = 2 minutes
+    
+    try:
+        result = s.check()
+        signal.alarm(0)  # Cancel the alarm if check() completes before timeout
+    except TimeoutError:
+        print("External timeout occurred after 2 minutes. Setting result to unknown.")
+        result = unknown
+    
     if result == unsat:
         print(f"LLM expression {expr1} and GT expression {expr2} are equivalent.")
         return True

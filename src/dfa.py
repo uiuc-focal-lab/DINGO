@@ -401,10 +401,8 @@ class DFAMatrixStore:
                 assert len(self.token_transitions[(current_state, token)]) == 1
                 current_state = self.token_transitions[(current_state, token)][0]
             except:
-                from transformers import AutoTokenizer
-                tokenizer = AutoTokenizer.from_pretrained('GSAI-ML/LLaDA-8B-Instruct')
-                import pdb; pdb.set_trace()
-        return current_state
+                return None, True
+        return current_state, False
 
     def check_is_reachable(self, tokens, is_final_block = False):
         """
@@ -438,7 +436,11 @@ class DFAMatrixStore:
 
     def ar_logits_process(self, input_ids, scores):
         # Use self.state_to_valid_transitions to set the scores to -inf for invalid transitions
-        current_state = self.traverse_token_path(input_ids[0].tolist(), self.initial_state)
+        current_state, some_error = self.traverse_token_path(input_ids[0].tolist(), self.initial_state)
+        if some_error:
+            scores[:, :, :] = -float('inf')
+            return scores
+            
         accept_mask = self.state_to_valid_transitions[current_state]
         
         if len(accept_mask) < scores.shape[2]:
@@ -449,12 +451,13 @@ class DFAMatrixStore:
         return scores
 
 
-def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device, enable_oppurtunistic = False):
+def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device, enable_oppurtunistic = False, shift_mdm_trans_cuda = False):
     if schema_key is None:
         dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(None, None, tokenizer)
-        dfa_store.edge_src = dfa_store.edge_src.to(device)
-        dfa_store.edge_dst = dfa_store.edge_dst.to(device)
-        dfa_store.edge_tok = dfa_store.edge_tok.to(device)
+        if shift_mdm_trans_cuda:
+            dfa_store.edge_src = dfa_store.edge_src.to(device)
+            dfa_store.edge_dst = dfa_store.edge_dst.to(device)
+            dfa_store.edge_tok = dfa_store.edge_tok.to(device)
         dfa_store.edge_src_nomdm = dfa_store.edge_src_nomdm.to(device)
         dfa_store.edge_dst_nomdm = dfa_store.edge_dst_nomdm.to(device)
         dfa_store.edge_tok_nomdm = dfa_store.edge_tok_nomdm.to(device)

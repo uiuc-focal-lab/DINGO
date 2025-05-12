@@ -44,7 +44,7 @@ def get_num_transfer_tokens(mask_index, steps):
 
 class LLADA: 
     def __init__(self, model, tokenizer, constraint_mode = 'original', steps = 128, gen_length = 128,
-                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, stop_word = None, stop_phrase = None, opp_end_char = None):
+                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, stop_word = None, stop_phrase = None, opp_end_char = None, use_opt_logits = False):
         
         self.model = model 
         self.tokenizer = tokenizer 
@@ -61,7 +61,8 @@ class LLADA:
         self.target_word = stop_word
         self.phrase = stop_phrase
         self.opp_end_char = opp_end_char
-
+        self.use_opt_logits = use_opt_logits
+        
     def __call__(self, prompt, dfa_store):
         if dfa_store is not None:
             self.dfa_store = dfa_store
@@ -124,6 +125,7 @@ class LLADA:
             cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
             cost_vector[self.dfa_store.initial_state] = 0.0
 
+        logits_opt = None
 
         for num_block in range(num_blocks):
             start_gen_idx = prompt.shape[1] + num_block * self.block_length
@@ -144,6 +146,9 @@ class LLADA:
                 else:
                     logits = self.model(x).logits
                 logits_with_noise = add_gumbel_noise(logits, temperature=self.temperature)
+                
+                if logits_opt is None: 
+                    logits_opt = torch.empty_like(logits_with_noise).to(x.device)
 
 
                 x0 = torch.argmax(logits_with_noise, dim=-1)
@@ -167,7 +172,7 @@ class LLADA:
                     _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
                     transfer_index[j, select_index] = True
                 x[transfer_index] = x0[transfer_index]
-
+                logits_opt[transfer_index] = logits_with_noise[transfer_index]
 
                 if self.constrain_at is not None and i >= self.constrain_at:
                     target_idx = -1
@@ -198,7 +203,7 @@ class LLADA:
                                 )
 
                                 # 2. logits for current position
-                                current_logits = logits_with_noise[:, j:j+1, :]
+                                current_logits = logits_with_noise[:, j:j+1, :] if not self.use_opt_logits else logits_opt[:, j:j+1, :]
 
                                 # 3. optionally change them
                                 #if not self.dfa_store.is_valid_ar(ar_x, current_logits.argmax(-1).squeeze(1)):
@@ -208,8 +213,6 @@ class LLADA:
                                 next_token = current_logits.argmax(-1).squeeze(1)   # greedy; replace with sampler if desired
                                 gen_ids.append(next_token)
 
-                                # 5. (optional) put the processed logits back if other code later relies on them
-                                logits_with_noise[:, j:j+1, :] = current_logits
                             
                             if gen_ids: 
                                 x[:, start_gen_idx:end_gen_idx] = torch.stack(gen_ids, dim=1)
@@ -220,9 +223,11 @@ class LLADA:
                                 opp_stop = True 
                             else:
                                 if i == steps - 1:
-                                    best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
+                                    best_intermediate_state, some_error = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
+                                    if some_error:
+                                        raise ValueError(f"Error in traversing token path for seq {self.tokenizer.decode(x[0, start_gen_idx:end_gen_idx].tolist())}")
                         else:
-                            gen_log_probs = F.log_softmax(logits_with_noise[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
+                            gen_log_probs = F.log_softmax(logits_opt[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
 
                             current_cost, selected_tokens, selected_sources = viterbi_block(
                                 self.edge_src if i != steps - 1 else self.edge_src_nomdm,
@@ -246,9 +251,6 @@ class LLADA:
                                 current_state = selected_sources[t][current_state].item() 
                             token_path.reverse()
                             x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x0.device)
-                            # if num_block == num_blocks - 1:
-                            #     import pdb;pdb.set_trace()
-                            # self.dfa_store.traverse_token_path(x[0, prompt.shape[1]:end_gen_idx].tolist(), self.dfa_store.initial_state)
 
             if opp_stop: 
                 return x

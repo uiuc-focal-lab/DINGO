@@ -145,7 +145,7 @@ def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confid
 
 class DREAM: 
     def __init__(self, model, tokenizer, constraint_mode = 'original', steps = 128, gen_length = 128,
-                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, stop_word = None, stop_phrase = None, opp_end_char = None):
+                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, stop_word = None, stop_phrase = None, opp_end_char = None, use_opt_logits = False):
         
         self.model = model 
         self.tokenizer = tokenizer 
@@ -160,6 +160,7 @@ class DREAM:
         self.target_word = stop_word
         self.phrase = stop_phrase
         self.opp_end_char = opp_end_char
+        self.use_opt_logits = use_opt_logits
         
     def __call__(self, prompt, dfa_store = None):
         if dfa_store is not None:
@@ -324,6 +325,7 @@ class DREAM:
                                                x.device, x.size(0))
             
             opp_stop = False
+            logits_opt = None
             for i in range(steps_per_block):
                 mask_all   = (x == mask_token_id)
                 mask_block = mask_all & active_block_mask
@@ -331,6 +333,8 @@ class DREAM:
                 logits = self.model(x, attention_mask, None).logits
                 logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
                 logits = generation_logits_hook_func(i, x, logits)
+                if logits_opt is None: 
+                    logits_opt = torch.empty_like(logits).to(x.device)
 
                 mask_logits = logits[mask_block]
                 
@@ -376,6 +380,7 @@ class DREAM:
                     x_write = torch.full_like(x, mask_token_id)
                     x_write[mask_block] = new_ids
                     x[transfer] = x_write[transfer]
+                    logits_opt[transfer] = logits[transfer]
 
 
                 # this allows user-defined token control of the intermediate steps
@@ -409,14 +414,12 @@ class DREAM:
                                     dim=1,
                                 )
                                 
-                                current_logits = logits[:, j:j+1, :]
-                                if not self.dfa_store.is_valid_ar(ar_x, current_logits.argmax(-1).squeeze(1)):
-                                    current_logits = self.dfa_store.ar_logits_process(ar_x, current_logits)
+                                current_logits = logits[:, j:j+1, :] if not self.use_opt_logits else logits_opt[:, j:j+1, :]
+                                current_logits = self.dfa_store.ar_logits_process(ar_x, current_logits)
                                 
                                 next_token = current_logits.argmax(-1).squeeze(1)   # greedy; replace with sampler if desired
                                 gen_ids.append(next_token)
 
-                                logits[:, j:j+1, :] = current_logits
                             
                             if gen_ids: 
                                 x[:, start_gen_idx:end_gen_idx] = torch.stack(gen_ids, dim=1)
@@ -427,9 +430,11 @@ class DREAM:
                                 opp_stop = True 
                             else:
                                 if i == steps_per_block - 1:
-                                    best_intermediate_state = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
+                                    best_intermediate_state, some_error = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
+                                    if some_error:
+                                        raise ValueError(f"Error in traversing token path for seq {self.tokenizer.decode(x[0, start_gen_idx:end_gen_idx].tolist())}")
                         else:
-                            gen_log_probs = F.log_softmax(logits[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
+                            gen_log_probs = F.log_softmax(logits_opt[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
                             
                             current_cost, selected_tokens, selected_sources = viterbi_block(
                                 self.edge_src if i != steps_per_block - 1 else self.edge_src_nomdm,
