@@ -50,7 +50,7 @@ def parse_arguments():
     parser.add_argument('--cfg_scale', type=float, default=0.0, help='cfg scale for diffusion')
     parser.add_argument('--remasking', type=str, default='low_confidence', help='remasking strategy')
     parser.add_argument('--constrain_at', type=int, default=None, help='constrain at step')
-    parser.add_argument('--enable_oppurtunistic', type=bool, default=True, help='enable oppurtunistic constrained decoding')
+    parser.add_argument('--enable_oppurtunistic', type=bool, default=False, help='enable oppurtunistic constrained decoding')
     parser.add_argument('--use_opt_logits_ar', type=bool, default=False, help='use opt logits')
 
     #Distributed inference args
