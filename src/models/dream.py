@@ -401,6 +401,8 @@ class DREAM:
                     else:
                         tokd_gen = x[0, input_ids.shape[1]:end_gen_idx].tolist()
                     
+                    if target_idx != -1 and constraint_mode == 'unconstrained':
+                        opp_stop = True 
                     
                     if constraint_mode == 'ar_constrained':
                         if not self.dfa_store.enable_oppurtunistic or not self.dfa_store.check_is_reachable(tokd_gen, is_final_block = num_block == num_blocks - 1):
@@ -434,8 +436,19 @@ class DREAM:
                                     if some_error:
                                         raise ValueError(f"Error in traversing token path for seq {self.tokenizer.decode(x[0, start_gen_idx:end_gen_idx].tolist())}")
                         else:
-                            gen_log_probs = F.log_softmax(logits_opt[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
-                            
+                            if i == steps_per_block - 1:
+                                gen_log_probs = F.log_softmax(logits_opt[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
+                            else:
+                                logits_opt_step = logits_opt[:, start_gen_idx:end_gen_idx, :].clone()
+                                mask_not_transferred = (x[:, start_gen_idx:end_gen_idx] == mask_token_id)
+                                mask_expanded = mask_not_transferred.unsqueeze(-1).expand(-1, -1, logits.size(-1))
+                                logits_opt_step = torch.where(
+                                    mask_expanded, 
+                                    logits[:, start_gen_idx:end_gen_idx, :],
+                                    logits_opt_step
+                                )
+                                gen_log_probs = F.log_softmax(logits_opt_step, dim=-1)[0]
+                                
                             current_cost, selected_tokens, selected_sources = viterbi_block(
                                 self.edge_src if i != steps_per_block - 1 else self.edge_src_nomdm,
                                 self.edge_dst if i != steps_per_block - 1 else self.edge_dst_nomdm,

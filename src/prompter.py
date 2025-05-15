@@ -38,7 +38,10 @@ class BasePrompter(ABC):
       
     def prompt(self, row, modify_system_prompt = True, chat_mode = True):
         if self.dataset == 'json_mode': 
-            return row['prompt']
+            if chat_mode:
+                return row['prompt']
+            else:
+                return row['prompt'][0]['content'] + '\n' + row['prompt'][1]['content']
         messages = []
         if chat_mode:
             for example in self.fewshots[:self.num_shots]:

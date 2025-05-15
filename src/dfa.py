@@ -12,6 +12,7 @@ from tqdm import tqdm
 from outlines_core.json_schema import build_regex_from_schema
 import re
 from copy import deepcopy
+import collections
 
 def sha256_digest(s: str) -> str:
     """Get the sha256 digest of a string
@@ -55,7 +56,21 @@ class DFAMatrixStore:
     
     def load_regex_dfa(self, schema, idx, grammar_string):
         if schema is not None:
-            if idx == 15:
+            if idx == 1:
+                pattern = re.compile(r'^\{"\/":\{"device":"\/[A-Za-z]{3}\/[A-Za-z]{3}[0-9]","mount_point":"\/","file_system_type":"[A-Za-z]{3}[0-9]","options":"[A-Za-z]{8}","dump":"[0-1]","pass":"[0-9]"\}\}$').pattern
+            elif idx == 9:
+                pattern = re.compile(
+    r'^\{"patentId":"[A-Za-z]","applicationDate":"[0-9]{4}-[0-9]{2}-[0-9]{2}","inventorNames":\[\],"currentStatus":"[A-Za-z]"\}$'
+).pattern
+            elif idx == 32:
+                pattern = re.compile(
+    r'^\{"statementID":"[A-Za-z]","customerID":"[A-Za-z]","startDate":"[0-9]{4}-[0-9]{2}-[0-9]{2}","endDate":"[0-9]{4}-[0-9]{2}-[0-9]{2}","transactions":\[\]\}$'
+).pattern
+            elif idx == 59:
+                pattern = re.compile(
+    r'^\{"policyName":"[A-Za-z]","firewallRules":\[\],"vpnRequirements":\{"vpnType":"[A-Za-z]","encryptionStandards":"[A-Za-z]"\}\}$'
+).pattern
+            elif idx == 15:
                 pattern = re.compile(
                     r'^(?:'
                     r'\{"deviceType": "smartphone", "brand": "[^"{}\n]+", "model": "[^"{}\n]+", "screenSize": "[^"{}\n]+"\}'
@@ -65,96 +80,68 @@ class DFAMatrixStore:
                 ).pattern
             elif idx == 16:
                 pattern = re.compile(r'^\{\s*"feedbackID":\s*"[^"\\]+",\s*"customerID":\s*"[^"\\]+",\s*"serviceRating":\s*[1-5],\s*"comments":\s*"[^"\\]+",\s*"submissionDate":\s*"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"\s*\}$').pattern
+            elif idx == 19:
+                pattern = re.compile(r'^\{"totalShipments": [0-9]{3}, "onTimeDeliveryRate": [0-9]{2}\.[0-9], "averageDeliveryTime": [0-9]{2}\.[0-9], "pendingShipments": [0-9]{2}\}$').pattern
             elif idx == 21:
                 s = r'"(?:[^"\\\n]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"'
-
                 pattern = re.compile(
                     rf'^\{{\s*"customerID"\s*:\s*{s}\s*,\s*"feedbackScore"\s*:\s*[1-5]'
                     rf'(?:\s*,\s*"comments"\s*:\s*{s})?\s*\}}$'
                 ).pattern
             elif idx == 24:
-                pattern = re.compile(r'^\{"storage": "/dev/sda1", "fstype": "ext4", "options": "rw,noatime", "readonly": false\}$').pattern
+                pattern = re.compile(r'^\{"storage": "\/[A-Za-z]{3}\/[A-Za-z]{3}[0-9]", "fstype": "[A-Za-z]{3}[0-9]", "options": "[A-Za-z]{2},[A-Za-z]{7}", "readonly": false\}$').pattern
             elif idx == 34:
                 pattern = re.compile(r'^\{\s*"reviewId"\s*:\s*"[^"{}\n]+",\s*"productId"\s*:\s*"[^"{}\n]+",\s*"reviewer"\s*:\s*\{\s*"userId"\s*:\s*"[^"{}\n]+",\s*"name"\s*:\s*"[^"{}\n]+"\s*\},\s*"rating"\s*:\s*[1-5],\s*"comments"\s*:\s*"[^"{}\n]+"\s*\}$').pattern
             elif idx == 37:
-                pattern = re.compile(
-                    r'^(?:'
-                    r'\{\s*"isMember":\s*true,\s*"membershipNumber":\s*"[^"]{10}"\s*\}'
-                    r'|'
-                    r'\{\s*"isMember":\s*false,\s*"membershipNumber":\s*"[^"]{15,}"\s*\}'
-                    r')$'
-                ).pattern
+                pattern = re.compile(r'^\{"isMember": true, "membershipNumber": "[0-9]{10}"\}$').pattern
             elif idx == 45:
                 pattern = re.compile(r'^\{\s*"cropType":\s*"[^"\n]+",\s*"harvestedArea":\s*\d+(?:\.\d+)?,\s*"yield":\s*\d+(?:\.\d+)?,\s*"productionDate":\s*"[^"\n]+"\s*\}$').pattern
             elif idx == 58:
                 pattern = re.compile(
-    r'^\{\s*"distributorID":\s*"[^"{}\n]+",\s*'
-     r'"companyName":\s*"[^"{}\n]+",\s*'
-     r'"contactInfo":\s*\{\s*'
-       r'"phone":\s*"[^"{}\n]+",\s*'
-       r'"email":\s*"[^"{}\n]+",\s*'
-       r'"address":\s*"[^"{}\n]+"\s*'
-     r'\},\s*'
-     r'"productCategories":\s*\[\s*'
-       r'"[^"{}\n]+"(?:\s*,\s*"[^"{}\n]+")*\s*'
+                    r'^\{\s*"distributorID":\s*"[^"\\{}\n]+",\s*'
+                    r'"companyName":\s*"[^"\\{}\n]+",\s*'
+                    r'"contactInfo":\s*\{\s*'
+                    r'"phone":\s*"[^"\\{}\n]+",\s*'
+                    r'"email":\s*"[^"\\{}\n]+",\s*'
+                    r'"address":\s*"[^"\\{}\n]+"\s*'
+                    r'\},\s*'
+                    r'"productCategories":\s*\[\s*'
+                    r'"[^"\\{}\n]+"(?:\s*,\s*"[^"\\{}\n]+")*\s*'
                     r'\]\s*\}$'
                 ).pattern
             elif idx == 63:
                 pattern = re.compile(
-    r'^\{\s*'
-      r'"feedbackID":\s*"[^"\\\n]+",\s*'
-      r'"customerID":\s*"[^"\\\n]+",\s*'
-      r'"productID":\s*"[^"\\\n]+",\s*'
-      r'"rating":\s*[1-5]'
+                    r'^\{\s*'
+                    r'"feedbackID":\s*"[^"\\\n]+",\s*'
+                    r'"customerID":\s*"[^"\\\n]+",\s*'
+                    r'"productID":\s*"[^"\\\n]+",\s*'
+                    r'"rating":\s*[1-5]'
                     r'(?:,\s*"comments":\s*"[^"\\\n]+")?'
                     r'\s*\}$'
                 ).pattern
-
-
-                
-
+            elif idx == 39:
+                pattern = re.compile(r'^\{ "foo" : true , "propertiesCount" : 20\}$').pattern
             elif idx == 19:
                 pattern = re.compile(r'^\{\s*"totalShipments":\s*\d+,\s*"onTimeDeliveryRate":\s*\d+(?:\.\d+)?,\s*"averageDeliveryTime":\s*\d+(?:\.\d+)?,\s*"pendingShipments":\s*\d+\s*\}$').pattern
             elif idx == 27:
-                pattern = re.compile(
-                    r'^\{\s*'
-                    r'"customerID":\s*"[^"\n]+",\s*'
-                    r'"vehicleID":\s*"[^"\n]+",\s*'
-                    r'"serviceRecords":\s*\[\s*'
-                    r'\{\s*'
-                        r'"serviceDate":\s*"\d{4}-\d{2}-\d{2}",\s*'
-                        r'"description":\s*"[^"\n]+",\s*'
-                        r'"cost":\s*\d+(?:\.\d+)?\s*'
-                    r'\}'
-                    r'(?:\s*,\s*'
-                        r'\{\s*'
-                        r'"serviceDate":\s*"\d{4}-\d{2}-\d{2}",\s*'
-                        r'"description":\s*"[^"\n]+",\s*'
-                        r'"cost":\s*\d+(?:\.\d+)?\s*'
-                        r'\}'
-                    r')*'
-                    r'\s*\],\s*'
-                                    r'"totalSpent":\s*\d+(?:\.\d+)?\s*'
-                                    r'\}$'
-                                ).pattern
+                pattern = re.compile(r'^\{"customerID":"[A-Za-z]","vehicleID":"[A-Za-z]","serviceRecords":\[\{"serviceDate":"[0-9]{4}-[0-9]{2}-[0-9]{2}","description":"[A-Za-z]","cost":[0-9]\}\],"totalSpent":[0-9]\}$').pattern
+            elif idx == 28:
+                pattern = re.compile(r'^\{"policyholder":\{"name":"[A-Za-z]","address":"[A-Za-z]","phone":"[A-Za-z]"\},"coverageDetails":\[\{"coverageType":"[A-Za-z]","coverageAmount":[0-9]\}\],"premium":\{"amount":[0-9],"frequency":"[A-Za-z]"\}\}$').pattern
             elif idx == 33:
-                pattern =re.compile(r'^\{\s*"LanguageLearning":\s*\{\s*"target_language":\s*"[^"{}\n]+",\s*"current_proficiency":\s*"[^"{}\n]+",\s*"learning_goals":\s*\[\s*"[^"{}\n]+"\s*(?:,\s*"[^"{}\n]+"\s*)*\],\s*"recommended_resources":\s*\[\s*"[^"{}\n]+"\s*(?:,\s*"[^"{}\n]+"\s*)*\]\s*\}\s*\}$').pattern
+                pattern = re.compile(r'^\{\s*"LanguageLearning":\s*\{\s*"target_language":\s*"[^"{}\n]+",\s*"current_proficiency":\s*"[^"{}\n]+",\s*"learning_goals":\s*\[\s*"[^"{}\n]+"\s*(?:,\s*"[^"{}\n]+"\s*)*\],\s*"recommended_resources":\s*\[\s*"[^"{}\n]+"\s*(?:,\s*"[^"{}\n]+"\s*)*\]\s*\}\s*\}$').pattern
             elif idx == 45:
                 pattern = re.compile(r'^\{\s*"cropType":\s*"[^"]+",\s*"harvestedArea":\s*\d+(?:\.\d+)?,\s*"yield":\s*\d+(?:\.\d+)?,\s*"productionDate":\s*"[^"]+"\s*\}$').pattern
-            elif idx == 72: 
+            elif idx == 72:
                 pattern = re.compile(
-    r'^\{\s*'
-    r'"current_location":\s*"(?:\\.|[^"\\\n])+",\s*'
-    r'"preferred_units":\s*"(?:\\.|[^"\\\n])+",\s*'
-    r'"weather_forecast":\s*"(?:\\.|[^"\\\n])+",\s*'
+                    r'^\{\s*'
+                    r'"current_location":\s*"(?:\\.|[^"\\\n])+",\s*'
+                    r'"preferred_units":\s*"(?:\\.|[^"\\\n])+",\s*'
+                    r'"weather_forecast":\s*"(?:\\.|[^"\\\n])+",\s*'
                     r'"recommended_activities":\s*\[\s*"(?:\\.|[^"\\\n])+"(?:\s*,\s*"(?:\\.|[^"\\\n])+")*\s*\]\s*'
                     r'\}$'
                 ).pattern
             elif idx == 97:
-                pattern = re.compile(
-    r'^\{"[^"{}\n]+": \{"fuelType": "[^"{}\n]+", "quantityInStock": \d+(?:\.\d+)?, "reorderLevel": \d+(?:\.\d+)?\}'
-    r'(?:, "[^"{}\n]+": \{"fuelType": "[^"{}\n]+", "quantityInStock": \d+(?:\.\d+)?, "reorderLevel": \d+(?:\.\d+)?\}){2}\}$'
-).pattern
+                pattern = re.compile(r'^\{"diesel": \{"fuelType": "[A-Za-z]{6}", "quantityInStock": [0-9]{4}, "reorderLevel": [0-9]{4}\}, "gasoline": \{"fuelType": "[A-Za-z]{8}", "quantityInStock": [0-9]{4}, "reorderLevel": [0-9]{4}\}, "aviationFuel": \{"fuelType": "[A-Za-z]{8} [A-Za-z]{4}", "quantityInStock": [0-9]{4}, "reorderLevel": [0-9]{4}\}\}$').pattern
             else:
                 pattern =  build_regex_from_schema(schema)
             
@@ -374,6 +361,7 @@ class DFAMatrixStore:
         self.token_transitions = token_transitions
         self.decoded_mask_id = tokenizer.decode(mask_id)
         self.eos_token_id = tokenizer.eos_token_id
+        # self.dst_to_final = self.precompute_back_dist(num_states, self.edge_src_nomdm, self.edge_dst_nomdm, final_states)
         
         Path(self.fpath).parent.mkdir(parents=True, exist_ok=True) 
         with open(self.fpath, 'wb') as f:
@@ -381,6 +369,40 @@ class DFAMatrixStore:
         
         self.dfa = dfa
         return self
+
+    def precompute_back_dist(self, num_states      : int,
+                            edge_src        : torch.Tensor,   # [E]
+                            edge_dst        : torch.Tensor,   # [E]
+                            final_states    : list[int]):
+        """
+        Returns
+        -------
+        dist        : 1-D LongTensor,  dist[q] = min #transitions from q → any final
+                    (∞  ⇔  no path exists)
+        buckets     : list[list[int]],  buckets[d] = states with dist == d
+        """
+
+        # ---- build reverse adjacency on CPU ----
+        rev_adj = [[] for _ in range(num_states)]
+        for s, d in zip(edge_src.tolist(), edge_dst.tolist()):
+            rev_adj[d].append(s)                    # edge d→s in the *reverse* graph
+
+        # ---- multi-source BFS from all finals ----
+        dist = [float('inf')] * num_states
+        dq   = collections.deque()
+
+        for f in final_states:
+            dist[f] = 0
+            dq.append(f)
+
+        while dq:
+            v = dq.popleft()
+            for u in rev_adj[v]:
+                if dist[u] == float('inf'):
+                    dist[u] = dist[v] + 1
+                    dq.append(u)
+
+        return torch.tensor(dist, dtype=torch.long)
 
     def validate(self, code, is_final_block = False, last_step = False):
         if self.enable_oppurtunistic:
@@ -461,6 +483,7 @@ def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device,
         dfa_store.edge_src_nomdm = dfa_store.edge_src_nomdm.to(device)
         dfa_store.edge_dst_nomdm = dfa_store.edge_dst_nomdm.to(device)
         dfa_store.edge_tok_nomdm = dfa_store.edge_tok_nomdm.to(device)
+        #dfa_store.dst_to_final = dfa_store.dst_to_final.to(device)
         return [dfa_store] * len(dataset)
     else:
         dfa_stores = []

@@ -59,7 +59,7 @@ class BaseLM:
             dfa_store.edge_src_nomdm = dfa_store.edge_src_nomdm.to(self.model.device)
             dfa_store.edge_dst_nomdm = dfa_store.edge_dst_nomdm.to(self.model.device)
             dfa_store.edge_tok_nomdm = dfa_store.edge_tok_nomdm.to(self.model.device)
-        
+            # dfa_store.dst_to_final = dfa_store.dst_to_final.to(self.model.device)
         if isinstance(prompt, list):
             prompt =  self.tokenizer.apply_chat_template(prompt, tokenize = False, add_generation_prompt = True)
         

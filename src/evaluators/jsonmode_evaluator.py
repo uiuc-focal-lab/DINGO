@@ -16,7 +16,30 @@ class JSONModeEvaluator(BaseEvaluator):
 
 
     def evaluate_answer(self, gen_output):
-        completion = gen_output['llm_response'].replace('```json', '').replace('```', '')
+        try:
+            json.loads(gen_output['llm_response']) 
+            completion = gen_output['llm_response']
+        except Exception as e:
+            try:
+                ast.literal_eval(gen_output['llm_response'])
+                completion = gen_output['llm_response']
+                
+            except Exception as e:
+                if '```json' in gen_output['llm_response']: 
+                    completion = gen_output['llm_response'][gen_output['llm_response'].find('```json') + len('```json'):]
+                    if '```' in completion:
+                        completion = completion[:completion.find('```')]
+                elif '```' in gen_output['llm_response']:
+                    completion = gen_output['llm_response'][gen_output['llm_response'].find('```') + len('```'):]
+                    if '```' in completion:
+                        completion = completion[:completion.find('```')]
+                else:
+                    if '{' in gen_output['llm_response'] and '}' in gen_output['llm_response']:
+                        completion = gen_output['llm_response']
+                        completion = completion[completion.find('{'):completion.rfind('}') + 1]
+                    else:
+                        completion = gen_output['llm_response']
+
         json_schema = json.loads(gen_output['schema'])
         
         
@@ -26,11 +49,11 @@ class JSONModeEvaluator(BaseEvaluator):
         try:
             generated_json = json.loads(completion)
             parses = True
-        except json.decoder.JSONDecodeError:
+        except Exception as e:
             try:
                 generated_json = ast.literal_eval(completion)
                 parses = True
-            except (SyntaxError, ValueError) as e:
+            except Exception as e:
                 generated_json = "" 
                 error_message = e 
                 error_type = "Syntax Error"
@@ -42,7 +65,7 @@ class JSONModeEvaluator(BaseEvaluator):
                     try:
                         validate(instance=item, schema=json_schema)
                         
-                    except ValidationError as e:
+                    except Exception as e:
                         error_message = e
                         error_type = "Validation Error"
                         correct = False
@@ -50,12 +73,15 @@ class JSONModeEvaluator(BaseEvaluator):
             else: 
                 try:
                     validate(instance=generated_json, schema=json_schema)
-                except ValidationError as e:
+                except Exception as e:
                     error_message = e
                     error_type = "Validation Error"
                     correct = False
         
-        question = gen_output['prompt'][0]['content'] + '\n' + gen_output['prompt'][1]['content']
+        if isinstance(gen_output['prompt'], str):
+            question = gen_output['prompt']
+        else:
+            question = gen_output['prompt'][0]['content'] + '\n' + gen_output['prompt'][1]['content']
         if not isinstance(error_message, str):
             if hasattr(error_message, 'message'):
                 error_message = error_message.message
