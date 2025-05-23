@@ -35,7 +35,7 @@ def parse_arguments():
     parser.add_argument('--write_file', type=bool, default=False, help='save results in file')
     
 
-    #CoT args
+    # CoT args
     parser.add_argument('--model', type=str, help='Model name, e.g., "gpt-3.5-turbo" or "gemini-1.0-pro"')
     parser.add_argument('--constraint_mode', type = str, default= 'unconstrained', help = 'Generation mode', choices = ['unconstrained', 'diffusion_constrained', 'ar_constrained'])
     parser.add_argument('--num_shots', type=int, default=8, help='number of few shots')
@@ -52,7 +52,7 @@ def parse_arguments():
     parser.add_argument('--constrain_at', type=int, default=None, help='constrain at step')
     parser.add_argument('--enable_oppurtunistic', type=bool, default=False, help='enable oppurtunistic constrained decoding')
 
-    #Distributed inference args
+    # Distributed inference args
     parser.add_argument('--enable_dist', type=bool, default=False, help='enable distributed inference')
     parser.add_argument('--num_gpus', type=int, default=1, help='number of gpus')
     parser.add_argument('--num_workers_per_gpu', type=int, default=1, help='number of workers per gpu')
@@ -71,8 +71,6 @@ def create_result_file(args):
     result_file = f"{args.log_dir}/{args.dataset}/{args.model.split('/')[-1]}/{args.constraint_mode}/cot={args.do_cot}/{args.num_shots}-shot/{file_id}.jsonl"
     Path(result_file).parent.mkdir(parents=True, exist_ok=True)
     return result_file
-
-
 
 def process_dataset_interactive(args):
     if args.constrain_at is None:
