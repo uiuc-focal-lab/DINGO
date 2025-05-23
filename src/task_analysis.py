@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import fire
 from get_avgs import get_avgs
+import srsly
 
 def extract_file_params(filename):
     """Extract parameters from the jsonl filename"""
@@ -25,6 +26,23 @@ def extract_file_params(filename):
     
     return params
 
+def compute_metrics_from_results(results):
+    """Compute accuracy, time, and parses metrics from a list of problem results"""
+    times = []
+    corrects = []
+    parses = []
+    
+    for r in results:
+        times.append(r['time'])
+        corrects.append(r['correct'])
+        parses.append(r['parses'])
+    
+    return {
+        'accuracy': round(100 * sum(corrects) / len(corrects), 2),
+        'time': round(sum(times) / len(times), 2),
+        'parses': round(100 * sum(parses) / len(parses), 2)
+    }
+
 def analyze_task(task_name, output_file='task_results.txt'):
     """
     Analyze the logging results for a specific task across all models and configurations.
@@ -40,6 +58,8 @@ def analyze_task(task_name, output_file='task_results.txt'):
         return
     
     results = []
+    # Store raw results for problem-wise comparison
+    raw_results_map = {}
     
     # Traverse the directory structure
     for model_dir in base_dir.iterdir():
@@ -69,9 +89,22 @@ def analyze_task(task_name, output_file='task_results.txt'):
                     for result_file in shot_dir.glob('*.jsonl'):
                         # Extract parameters from filename
                         params = extract_file_params(result_file.name)
+                        file_path = str(result_file)
                         
                         # Get accuracy and time metrics
-                        metrics = get_avgs(str(result_file))
+                        metrics = get_avgs(file_path)
+                        
+                        # Store raw results for problem-wise comparison if needed
+                        config_key = (model_name, cot_value, num_shots, 
+                                    params.get('steps', None), 
+                                    params.get('gen_length', None), 
+                                    params.get('block_length', None), 
+                                    params.get('constrain_at', None))
+                        
+                        if constraint_type in ['ar_constrained', 'unconstrained']:
+                            if config_key not in raw_results_map:
+                                raw_results_map[config_key] = {}
+                            raw_results_map[config_key][constraint_type] = file_path
                         
                         # Compile all information
                         result_entry = {
@@ -86,6 +119,59 @@ def analyze_task(task_name, output_file='task_results.txt'):
                         }
                         
                         results.append(result_entry)
+    
+    # Now generate b_ar_unconstrained entries with problem-wise comparison
+    for config_key, constraint_files in raw_results_map.items():
+        if 'ar_constrained' in constraint_files and 'unconstrained' in constraint_files:
+            model, cot, num_shots, steps, gen_length, block_length, constrain_at = config_key
+            
+            # Load the raw results for both constraint types
+            ar_results = list(srsly.read_jsonl(constraint_files['ar_constrained']))
+            unconstrained_results = list(srsly.read_jsonl(constraint_files['unconstrained']))
+            
+            # Make sure both result lists have the same problems in the same order
+            if len(ar_results) != len(unconstrained_results):
+                print(f"Warning: Different number of problems for {model}, {cot}, {num_shots}")
+                continue
+            
+            # Create a new combined result list taking the better result for each problem
+            combined_results = []
+            for i, (ar_res, unc_res) in enumerate(zip(ar_results, unconstrained_results)):
+                # Choose the better result for this problem
+                # Prefer correct over parsing, and if both are equal, prefer faster
+                better_res = {
+                    'correct': max(ar_res['correct'], unc_res['correct']),
+                    'parses': max(ar_res['parses'], unc_res['parses']),
+                    'time': min(ar_res['time'], unc_res['time'])
+                }
+                
+                combined_results.append(better_res)
+            
+            # Compute metrics for the combined results
+            metrics = compute_metrics_from_results(combined_results)
+            
+            # Create the b_ar_unconstrained entry
+            result_entry = {
+                'model': model,
+                'constraint_type': 'b_ar_unconstrained',
+                'cot': cot,
+                'num_shots': num_shots,
+                'accuracy': metrics['accuracy'],
+                'time': metrics['time'],
+                'parses': metrics['parses'],
+            }
+            
+            # Add the parameters if they exist
+            if steps is not None:
+                result_entry['steps'] = steps
+            if gen_length is not None:
+                result_entry['gen_length'] = gen_length
+            if block_length is not None:
+                result_entry['block_length'] = block_length
+            if constrain_at is not None:
+                result_entry['constrain_at'] = constrain_at
+            
+            results.append(result_entry)
     
     # Convert results to DataFrame for easier manipulation
     df = pd.DataFrame(results)

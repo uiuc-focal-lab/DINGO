@@ -18,3 +18,4 @@ src/run_gsm_symbolic.sh
 cache/
 logging/
 .vscode/
+!src/run_exp.sh

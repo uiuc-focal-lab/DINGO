@@ -51,7 +51,6 @@ def parse_arguments():
     parser.add_argument('--remasking', type=str, default='low_confidence', help='remasking strategy')
     parser.add_argument('--constrain_at', type=int, default=None, help='constrain at step')
     parser.add_argument('--enable_oppurtunistic', type=bool, default=False, help='enable oppurtunistic constrained decoding')
-    parser.add_argument('--use_opt_logits_ar', type=bool, default=False, help='use opt logits')
 
     #Distributed inference args
     parser.add_argument('--enable_dist', type=bool, default=False, help='enable distributed inference')
@@ -67,7 +66,7 @@ def set_default(obj):
 
 def create_result_file(args):
 
-    file_id = f"step={args.steps}_gen_length={args.gen_length}_block_length={args.block_length}_temperature={args.temperature}_cfg_scale={args.cfg_scale}_remasking={args.remasking}_constrain_at={args.constrain_at}_oppurtunistic={args.enable_oppurtunistic}_optlogits={args.use_opt_logits_ar}"
+    file_id = f"step={args.steps}_gen_length={args.gen_length}_block_length={args.block_length}_temperature={args.temperature}_cfg_scale={args.cfg_scale}_remasking={args.remasking}_constrain_at={args.constrain_at}_oppurtunistic={args.enable_oppurtunistic}"
     
     result_file = f"{args.log_dir}/{args.dataset}/{args.model.split('/')[-1]}/{args.constraint_mode}/cot={args.do_cot}/{args.num_shots}-shot/{file_id}.jsonl"
     Path(result_file).parent.mkdir(parents=True, exist_ok=True)
@@ -76,13 +75,13 @@ def create_result_file(args):
 
 
 def process_dataset_interactive(args):
-    if args.constraint_mode == 'diffusion_constrained':
-        assert args.constrain_at is not None
+    if args.constrain_at is None:
+        args.constrain_at = (args.steps // (args.gen_length // args.block_length)) - 1
     
     dataset, schema_key = load_dataset_by_name(args.dataset)
     
     llm = BaseLM(args.model,args.dataset, 'cuda', args.do_cot, device_map = 'auto', constraint_mode = args.constraint_mode, steps = args.steps, gen_length = args.gen_length,
-                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, enable_oppurtunistic = args.enable_oppurtunistic, schema_key = schema_key, use_opt_logits = args.use_opt_logits_ar)
+                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, enable_oppurtunistic = args.enable_oppurtunistic, schema_key = schema_key)
     
     shift_mdm_trans_cuda = (args.constrain_at < (args.steps // (args.gen_length // args.block_length)) - 1)
     
@@ -152,9 +151,9 @@ def process_dataset_parallel(args):
     if not ray.is_initialized():
         ray.init()
     
+    if args.constrain_at is None:
+        args.constrain_at = (args.steps // (args.gen_length // args.block_length)) - 1
 
-    if args.constraint_mode == 'diffusion_constrained':
-        assert args.constrain_at is not None
     
     shift_mdm_trans_cuda = (args.constrain_at < (args.steps // (args.gen_length // args.block_length)) - 1)
     dataset, schema_key =  load_dataset_by_name(args.dataset)
@@ -192,7 +191,7 @@ def process_dataset_parallel(args):
         def __init__(self):
             self.prompt_fn = BasePrompter(dataset = args.dataset, num_shots= args.num_shots, do_cot = args.do_cot)
             self.llm = BaseLM(args.model, args.dataset, 'cuda', args.do_cot, device_map = None, constraint_mode = args.constraint_mode, gen_length = args.gen_length,
-                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, enable_oppurtunistic = args.enable_oppurtunistic, schema_key = schema_key, use_opt_logits = args.use_opt_logits_ar)
+                 block_length = args.block_length, temperature = args.temperature, cfg_scale = args.cfg_scale, remasking = args.remasking, constrain_at = args.constrain_at, enable_oppurtunistic = args.enable_oppurtunistic, schema_key = schema_key)
         
         def process_item(self, batch):
             batch = {key: value[0] for key, value in batch.items()}

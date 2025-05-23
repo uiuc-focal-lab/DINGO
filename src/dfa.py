@@ -13,6 +13,8 @@ from outlines_core.json_schema import build_regex_from_schema
 import re
 from copy import deepcopy
 import collections
+import time
+import numpy as np
 
 def sha256_digest(s: str) -> str:
     """Get the sha256 digest of a string
@@ -56,95 +58,7 @@ class DFAMatrixStore:
     
     def load_regex_dfa(self, schema, idx, grammar_string):
         if schema is not None:
-            if idx == 1:
-                pattern = re.compile(r'^\{"\/":\{"device":"\/[A-Za-z]{3}\/[A-Za-z]{3}[0-9]","mount_point":"\/","file_system_type":"[A-Za-z]{3}[0-9]","options":"[A-Za-z]{8}","dump":"[0-1]","pass":"[0-9]"\}\}$').pattern
-            elif idx == 9:
-                pattern = re.compile(
-    r'^\{"patentId":"[A-Za-z]","applicationDate":"[0-9]{4}-[0-9]{2}-[0-9]{2}","inventorNames":\[\],"currentStatus":"[A-Za-z]"\}$'
-).pattern
-            elif idx == 32:
-                pattern = re.compile(
-    r'^\{"statementID":"[A-Za-z]","customerID":"[A-Za-z]","startDate":"[0-9]{4}-[0-9]{2}-[0-9]{2}","endDate":"[0-9]{4}-[0-9]{2}-[0-9]{2}","transactions":\[\]\}$'
-).pattern
-            elif idx == 59:
-                pattern = re.compile(
-    r'^\{"policyName":"[A-Za-z]","firewallRules":\[\],"vpnRequirements":\{"vpnType":"[A-Za-z]","encryptionStandards":"[A-Za-z]"\}\}$'
-).pattern
-            elif idx == 15:
-                pattern = re.compile(
-                    r'^(?:'
-                    r'\{"deviceType": "smartphone", "brand": "[^"{}\n]+", "model": "[^"{}\n]+", "screenSize": "[^"{}\n]+"\}'
-                    r'|'
-                    r'\{"deviceType": "laptop", "brand": "[^"{}\n]+", "model": "[^"{}\n]+", "processor": "[^"{}\n]+", "RAMSize": "[^"{}\n]+"\}'
-                    r')$'
-                ).pattern
-            elif idx == 16:
-                pattern = re.compile(r'^\{\s*"feedbackID":\s*"[^"\\]+",\s*"customerID":\s*"[^"\\]+",\s*"serviceRating":\s*[1-5],\s*"comments":\s*"[^"\\]+",\s*"submissionDate":\s*"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z"\s*\}$').pattern
-            elif idx == 19:
-                pattern = re.compile(r'^\{"totalShipments": [0-9]{3}, "onTimeDeliveryRate": [0-9]{2}\.[0-9], "averageDeliveryTime": [0-9]{2}\.[0-9], "pendingShipments": [0-9]{2}\}$').pattern
-            elif idx == 21:
-                s = r'"(?:[^"\\\n]|\\["\\/bfnrt]|\\u[0-9A-Fa-f]{4})*"'
-                pattern = re.compile(
-                    rf'^\{{\s*"customerID"\s*:\s*{s}\s*,\s*"feedbackScore"\s*:\s*[1-5]'
-                    rf'(?:\s*,\s*"comments"\s*:\s*{s})?\s*\}}$'
-                ).pattern
-            elif idx == 24:
-                pattern = re.compile(r'^\{"storage": "\/[A-Za-z]{3}\/[A-Za-z]{3}[0-9]", "fstype": "[A-Za-z]{3}[0-9]", "options": "[A-Za-z]{2},[A-Za-z]{7}", "readonly": false\}$').pattern
-            elif idx == 34:
-                pattern = re.compile(r'^\{\s*"reviewId"\s*:\s*"[^"{}\n]+",\s*"productId"\s*:\s*"[^"{}\n]+",\s*"reviewer"\s*:\s*\{\s*"userId"\s*:\s*"[^"{}\n]+",\s*"name"\s*:\s*"[^"{}\n]+"\s*\},\s*"rating"\s*:\s*[1-5],\s*"comments"\s*:\s*"[^"{}\n]+"\s*\}$').pattern
-            elif idx == 37:
-                pattern = re.compile(r'^\{"isMember": true, "membershipNumber": "[0-9]{10}"\}$').pattern
-            elif idx == 45:
-                pattern = re.compile(r'^\{\s*"cropType":\s*"[^"\n]+",\s*"harvestedArea":\s*\d+(?:\.\d+)?,\s*"yield":\s*\d+(?:\.\d+)?,\s*"productionDate":\s*"[^"\n]+"\s*\}$').pattern
-            elif idx == 58:
-                pattern = re.compile(
-                    r'^\{\s*"distributorID":\s*"[^"\\{}\n]+",\s*'
-                    r'"companyName":\s*"[^"\\{}\n]+",\s*'
-                    r'"contactInfo":\s*\{\s*'
-                    r'"phone":\s*"[^"\\{}\n]+",\s*'
-                    r'"email":\s*"[^"\\{}\n]+",\s*'
-                    r'"address":\s*"[^"\\{}\n]+"\s*'
-                    r'\},\s*'
-                    r'"productCategories":\s*\[\s*'
-                    r'"[^"\\{}\n]+"(?:\s*,\s*"[^"\\{}\n]+")*\s*'
-                    r'\]\s*\}$'
-                ).pattern
-            elif idx == 63:
-                pattern = re.compile(
-                    r'^\{\s*'
-                    r'"feedbackID":\s*"[^"\\\n]+",\s*'
-                    r'"customerID":\s*"[^"\\\n]+",\s*'
-                    r'"productID":\s*"[^"\\\n]+",\s*'
-                    r'"rating":\s*[1-5]'
-                    r'(?:,\s*"comments":\s*"[^"\\\n]+")?'
-                    r'\s*\}$'
-                ).pattern
-            elif idx == 39:
-                pattern = re.compile(r'^\{ "foo" : true , "propertiesCount" : 20\}$').pattern
-            elif idx == 19:
-                pattern = re.compile(r'^\{\s*"totalShipments":\s*\d+,\s*"onTimeDeliveryRate":\s*\d+(?:\.\d+)?,\s*"averageDeliveryTime":\s*\d+(?:\.\d+)?,\s*"pendingShipments":\s*\d+\s*\}$').pattern
-            elif idx == 27:
-                pattern = re.compile(r'^\{"customerID":"[A-Za-z]","vehicleID":"[A-Za-z]","serviceRecords":\[\{"serviceDate":"[0-9]{4}-[0-9]{2}-[0-9]{2}","description":"[A-Za-z]","cost":[0-9]\}\],"totalSpent":[0-9]\}$').pattern
-            elif idx == 28:
-                pattern = re.compile(r'^\{"policyholder":\{"name":"[A-Za-z]","address":"[A-Za-z]","phone":"[A-Za-z]"\},"coverageDetails":\[\{"coverageType":"[A-Za-z]","coverageAmount":[0-9]\}\],"premium":\{"amount":[0-9],"frequency":"[A-Za-z]"\}\}$').pattern
-            elif idx == 33:
-                pattern = re.compile(r'^\{\s*"LanguageLearning":\s*\{\s*"target_language":\s*"[^"{}\n]+",\s*"current_proficiency":\s*"[^"{}\n]+",\s*"learning_goals":\s*\[\s*"[^"{}\n]+"\s*(?:,\s*"[^"{}\n]+"\s*)*\],\s*"recommended_resources":\s*\[\s*"[^"{}\n]+"\s*(?:,\s*"[^"{}\n]+"\s*)*\]\s*\}\s*\}$').pattern
-            elif idx == 45:
-                pattern = re.compile(r'^\{\s*"cropType":\s*"[^"]+",\s*"harvestedArea":\s*\d+(?:\.\d+)?,\s*"yield":\s*\d+(?:\.\d+)?,\s*"productionDate":\s*"[^"]+"\s*\}$').pattern
-            elif idx == 72:
-                pattern = re.compile(
-                    r'^\{\s*'
-                    r'"current_location":\s*"(?:\\.|[^"\\\n])+",\s*'
-                    r'"preferred_units":\s*"(?:\\.|[^"\\\n])+",\s*'
-                    r'"weather_forecast":\s*"(?:\\.|[^"\\\n])+",\s*'
-                    r'"recommended_activities":\s*\[\s*"(?:\\.|[^"\\\n])+"(?:\s*,\s*"(?:\\.|[^"\\\n])+")*\s*\]\s*'
-                    r'\}$'
-                ).pattern
-            elif idx == 97:
-                pattern = re.compile(r'^\{"diesel": \{"fuelType": "[A-Za-z]{6}", "quantityInStock": [0-9]{4}, "reorderLevel": [0-9]{4}\}, "gasoline": \{"fuelType": "[A-Za-z]{8}", "quantityInStock": [0-9]{4}, "reorderLevel": [0-9]{4}\}, "aviationFuel": \{"fuelType": "[A-Za-z]{8} [A-Za-z]{4}", "quantityInStock": [0-9]{4}, "reorderLevel": [0-9]{4}\}\}$').pattern
-            else:
-                pattern =  build_regex_from_schema(schema)
-            
+            pattern = schema
         else:
             pattern_dict = lark_to_regex(grammar_string)
             pattern = pattern_dict['start']
@@ -475,7 +389,10 @@ class DFAMatrixStore:
 
 def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device, enable_oppurtunistic = False, shift_mdm_trans_cuda = False):
     if schema_key is None:
+        start_time = time.time()
         dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(None, None, tokenizer)
+        end_time = time.time()
+        print(f"Time taken to build DFA store: {end_time - start_time} seconds")
         if shift_mdm_trans_cuda:
             dfa_store.edge_src = dfa_store.edge_src.to(device)
             dfa_store.edge_dst = dfa_store.edge_dst.to(device)
@@ -486,10 +403,15 @@ def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device,
         #dfa_store.dst_to_final = dfa_store.dst_to_final.to(device)
         return [dfa_store] * len(dataset)
     else:
+        times = []
         dfa_stores = []
         for row in tqdm(dataset, total=len(dataset), desc="Building DFA stores"):
             schema = row[schema_key]
             idx = row['idx']
+            start_time = time.time()
             dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(schema, idx, tokenizer)
+            end_time = time.time()
+            times.append(end_time - start_time)
             dfa_stores.append(dfa_store)
+        print(f"Time taken to build DFA stores: {np.mean(times)} seconds")
         return dfa_stores

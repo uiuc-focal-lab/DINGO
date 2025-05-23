@@ -7,13 +7,13 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 's
 
 def get_stop_word_phrase(task_name, model_name):
     if task_name == 'gsm_symbolic' and 'base' in model_name.lower():
-        return '>>', 'The final answer', None
+        return '>>', 'The final answer'
     else:
-        return None, None, None
+        return None, None
 
 class BaseLM:
     def __init__(self, model_name, task_name, device, do_cot, device_map = None, constraint_mode = 'original', steps = 128, gen_length = 128,
-                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, enable_oppurtunistic = False, schema_key = None, use_opt_logits = False):
+                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, enable_oppurtunistic = False, schema_key = None):
         
         if device_map is None: 
             self.model = AutoModel.from_pretrained(model_name, torch_dtype = torch.bfloat16, trust_remote_code = True, cache_dir = os.environ['HF_CACHE']).to(device)
@@ -31,14 +31,11 @@ class BaseLM:
         elif 'llada' in model_name.lower():
             from .llada import LLADA
             self.backend = 'LLADA'
-        elif 'diffu_llama' in model_name.lower():
-            from .diffu_llama import DiffuLlama
-            self.backend = 'DiffuLlama'
         else:
             raise ValueError(f"Model {model_name} not supported")
         
-        stop_word, stop_phrase, opp_end_char = get_stop_word_phrase(task_name, model_name)
-        self.generator = eval(f'{self.backend}')(self.model, self.tokenizer, constraint_mode, steps, gen_length, block_length, temperature, cfg_scale, remasking, constrain_at, stop_word, stop_phrase, opp_end_char, use_opt_logits)
+        stop_word, stop_phrase = get_stop_word_phrase(task_name, model_name)
+        self.generator = eval(f'{self.backend}')(self.model, self.tokenizer, constraint_mode, steps, gen_length, block_length, temperature, cfg_scale, remasking, constrain_at, stop_word, stop_phrase)
 
         self.task_name = task_name
         self.do_cot = do_cot

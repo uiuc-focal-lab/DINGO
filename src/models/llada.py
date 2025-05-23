@@ -44,7 +44,7 @@ def get_num_transfer_tokens(mask_index, steps):
 
 class LLADA: 
     def __init__(self, model, tokenizer, constraint_mode = 'original', steps = 128, gen_length = 128,
-                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, stop_word = None, stop_phrase = None, opp_end_char = None, use_opt_logits = False):
+                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, stop_word = None, stop_phrase = None):
         
         self.model = model 
         self.tokenizer = tokenizer 
@@ -60,8 +60,6 @@ class LLADA:
         
         self.target_word = stop_word
         self.phrase = stop_phrase
-        self.opp_end_char = opp_end_char
-        self.use_opt_logits = use_opt_logits
         
     def __call__(self, prompt, dfa_store):
         if dfa_store is not None:
@@ -147,7 +145,8 @@ class LLADA:
                 logits_with_noise = add_gumbel_noise(logits, temperature=self.temperature)
                 
                 if logits_opt is None: 
-                    logits_opt = torch.empty_like(logits_with_noise).to(x.device)
+                    logits_opt = torch.full_like(logits_with_noise, -float('inf')).to(x.device)
+                    logits_opt[:, :, self.tokenizer.mask_token_id] = 0
 
 
                 x0 = torch.argmax(logits_with_noise, dim=-1)
@@ -181,8 +180,6 @@ class LLADA:
                         if target_idx != -1:
                             decoded_gen = target_idx
                         
-                        if self.opp_end_char is not None and not decoded_gen.endswith(self.opp_end_char) and (num_block == num_blocks - 1 or target_idx != -1):
-                            decoded_gen = decoded_gen + self.opp_end_char
                         tokd_gen = self.tokenizer(decoded_gen).input_ids
                     else:
                         tokd_gen = x[0, prompt.shape[1]:end_gen_idx].tolist()
@@ -205,7 +202,13 @@ class LLADA:
                                 )
 
                                 # 2. logits for current position
-                                current_logits = logits_with_noise[:, j:j+1, :] if not self.use_opt_logits else logits_opt[:, j:j+1, :]
+                                current_logits = logits_with_noise[:, j:j+1, :]
+                                if i < steps - 1:
+                                    mask_block = (x[:, j:j+1] == self.mask_id)[0]  
+                                    if mask_block.any():
+                                        current_logits[0, mask_block, :] = float('-inf')
+                                        current_logits[0, mask_block, self.mask_id] = 0.0
+                                    
 
                                 # 3. optionally change them
                                 #if not self.dfa_store.is_valid_ar(ar_x, current_logits.argmax(-1).squeeze(1)):
@@ -229,18 +232,8 @@ class LLADA:
                                     if some_error:
                                         raise ValueError(f"Error in traversing token path for seq {self.tokenizer.decode(x[0, start_gen_idx:end_gen_idx].tolist())}")
                         else:
-                            if i == steps - 1:
-                                gen_log_probs = F.log_softmax(logits_opt[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
-                            else:
-                                logits_opt_step = logits_opt[:, start_gen_idx:end_gen_idx, :].clone()
-                                mask_not_transferred = (x[:, start_gen_idx:end_gen_idx] == self.mask_id)
-                                mask_expanded = mask_not_transferred.unsqueeze(-1).expand(-1, -1, logits_with_noise.size(-1))
-                                logits_opt_step = torch.where(
-                                    mask_expanded, 
-                                    logits_with_noise[:, start_gen_idx:end_gen_idx, :],
-                                    logits_opt_step
-                                )
-                                gen_log_probs = F.log_softmax(logits_opt_step, dim=-1)[0]
+                            gen_log_probs = F.log_softmax(logits_opt[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
+
                             current_cost, selected_tokens, selected_sources = viterbi_block(
                                 self.edge_src if i != steps - 1 else self.edge_src_nomdm,
                                 self.edge_dst if i != steps - 1 else self.edge_dst_nomdm,
