@@ -6,7 +6,7 @@ Official Implementation of [DINGO: Constrained Inference for Diffusion LLMs](htt
 
 ## DINGO DEMO 
 
-This is the visualization of the DINGO workflow, which seamlessly handles any regular expression, including those used in JSON Schema definitions.
+This is the visualization of the DINGO workflow, which seamlessly handles any regular expression, including those used in JSON Schema definitions. DINGO always draws the highest probability string that is structurally valid.
 
 > ![DINGO Workflow](./DINGO.gif)
 
