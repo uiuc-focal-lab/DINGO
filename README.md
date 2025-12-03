@@ -4,6 +4,12 @@
 Official Implementation of [DINGO: Constrained Inference for Diffusion LLMs](https://arxiv.org/abs/2505.23061) published at the [NeurIPS 2025](https://neurips.cc/).
 
 
+## DINGO DEMO 
+
+This is the visualization of the DINGO workflow, which seamlessly handles any regular expression, including those used in JSON Schema definitions.
+
+> ![DINGO Workflow](./DINGO.gif)
+
 ## Citation
 
 ```bibtex
