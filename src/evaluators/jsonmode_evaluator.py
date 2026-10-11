@@ -1,103 +1,52 @@
+import json
+
+from jsonschema import SchemaError, ValidationError, validate
 
 from .base_evaluator import BaseEvaluator
-import ast
-import json
-from jsonschema import validate, ValidationError, SchemaError
-
-
 
 
 class JSONModeEvaluator(BaseEvaluator):
-    def __init__(self, dataset, do_cot = False):
-        super().__init__(dataset, do_cot)
-    
     def parse_completion_regex(self, response):
         return response
 
-
     def evaluate_answer(self, gen_output):
+        response = gen_output["llm_response"]
+        parses, correct = False, False
+        error_type, error_message = "No Error", ""
+        generated = None
+        schema = gen_output["schema"]
+        if isinstance(schema, str):
+            schema = json.loads(schema)
         try:
-            json.loads(gen_output['llm_response']) 
-            completion = gen_output['llm_response']
-        except Exception as e:
-            try:
-                ast.literal_eval(gen_output['llm_response'])
-                completion = gen_output['llm_response']
-                
-            except Exception as e:
-                if '```json' in gen_output['llm_response']: 
-                    completion = gen_output['llm_response'][gen_output['llm_response'].find('```json') + len('```json'):]
-                    if '```' in completion:
-                        completion = completion[:completion.find('```')]
-                elif '```' in gen_output['llm_response']:
-                    completion = gen_output['llm_response'][gen_output['llm_response'].find('```') + len('```'):]
-                    if '```' in completion:
-                        completion = completion[:completion.find('```')]
-                else:
-                    if '{' in gen_output['llm_response'] and '}' in gen_output['llm_response']:
-                        completion = gen_output['llm_response']
-                        completion = completion[completion.find('{'):completion.rfind('}') + 1]
-                    else:
-                        completion = gen_output['llm_response']
+            # Python's JSON parser otherwise accepts NaN/Infinity, which JSON
+            # does not. Python literals and surrounding prose are not JSON.
+            def reject_constant(value):
+                raise ValueError(f"Invalid JSON constant: {value}")
 
-        json_schema = json.loads(gen_output['schema'])
-        
-        
-        parses = False 
-        error_type = "No Error"
-        error_message = ""
-        try:
-            generated_json = json.loads(completion)
+            generated = json.loads(response, parse_constant=reject_constant)
             parses = True
-        except Exception as e:
-            try:
-                generated_json = ast.literal_eval(completion)
-                parses = True
-            except Exception as e:
-                generated_json = "" 
-                error_message = e 
-                error_type = "Syntax Error"
-        
-        correct = parses
+        except (ValueError, TypeError) as exc:
+            error_type, error_message = "Syntax Error", str(exc)
         if parses:
-            if isinstance(generated_json, list):
-                for index, item in enumerate(generated_json):
-                    try:
-                        validate(instance=item, schema=json_schema)
-                        
-                    except Exception as e:
-                        error_message = e
-                        error_type = "Validation Error"
-                        correct = False
-                        break
-            else: 
-                try:
-                    validate(instance=generated_json, schema=json_schema)
-                except Exception as e:
-                    error_message = e
-                    error_type = "Validation Error"
-                    correct = False
-        
-        if isinstance(gen_output['prompt'], str):
-            question = gen_output['prompt']
-        else:
-            question = gen_output['prompt'][0]['content'] + '\n' + gen_output['prompt'][1]['content']
-        if not isinstance(error_message, str):
-            if hasattr(error_message, 'message'):
-                error_message = error_message.message
-            else:
-                error_message = str(error_message)
-        results = {
-            'question': question,
-            'gold_answer': gen_output['completion'],
-            'schema': gen_output['schema'],
-            'correct': correct,
-            'parses': parses,
-            'error_type': error_type,
-            'llm_response': completion,
-            'generated_json': str(generated_json),
-            'error_message': error_message,
-            'time': gen_output['response_info']['time'], 
+            try:
+                validate(instance=generated, schema=schema)
+                correct = True
+            except (ValidationError, SchemaError) as exc:
+                error_type, error_message = "Validation Error", exc.message
+        prompt = gen_output["prompt"]
+        question = prompt if isinstance(prompt, str) else "\n".join(m["content"] for m in prompt)
+        result = {
+            "question": question,
+            "gold_answer": gen_output["completion"],
+            "schema": gen_output["schema"],
+            "correct": correct,
+            "parses": parses,
+            "error_type": error_type,
+            "llm_response": response,
+            "generated_json": str(generated),
+            "error_message": error_message,
+            "time": gen_output["response_info"]["time"],
         }
-        
-        return results
+        if "idx" in gen_output:
+            result["idx"] = gen_output["idx"]
+        return result

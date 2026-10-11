@@ -1,16 +1,17 @@
-import torch
-from transformers import AutoModel, AutoTokenizer, GenerationConfig, __version__
+import warnings
 from typing import Optional, Union
+
+import torch
 import torch.distributions as dists
 import torch.nn.functional as F
-import warnings
+from transformers import GenerationConfig, __version__
 from transformers.utils import (
     ModelOutput,
     is_torchdynamo_compiling,
-    logging,
 )
-from .viterbi import viterbi_block
-from .gen_utils import find_target_after_phrase, find_target_after_phrase_str
+
+from .constrained_decode import decode_block, reset_decode_validation, validate_decode_block
+from .gen_utils import completed_stop_prefix, reveal_schedule, validate_generation_settings
 
 
 def get_num_transfer_tokens(mask_index: torch.BoolTensor, steps: int) -> torch.LongTensor:
@@ -19,15 +20,17 @@ def get_num_transfer_tokens(mask_index: torch.BoolTensor, steps: int) -> torch.L
     each reverse step so that the **expected** number per step is constant.
     Returned shape: [B, steps]
     """
-    mask_num = mask_index.sum(dim=1, keepdim=True)                 # [B,1]
-    base      = mask_num // steps
-    remainder = mask_num %  steps
+    mask_num = mask_index.sum(dim=1, keepdim=True)  # [B,1]
+    base = mask_num // steps
+    remainder = mask_num % steps
 
-    n = torch.zeros(mask_num.size(0), steps, device=mask_index.device,
-                    dtype=torch.long) + base                       # [B,steps]
+    n = (
+        torch.zeros(mask_num.size(0), steps, device=mask_index.device, dtype=torch.long) + base
+    )  # [B,steps]
     for b in range(mask_num.size(0)):
         n[b, : remainder[b]] += 1
     return n
+
 
 def _active_block_mask(seq_len: int, block_slice: slice, device, batch):
     """
@@ -37,6 +40,7 @@ def _active_block_mask(seq_len: int, block_slice: slice, device, batch):
     m = torch.zeros(batch, seq_len, dtype=torch.bool, device=device)
     m[:, block_slice] = True
     return m
+
 
 class DreamGenerationConfig(GenerationConfig):
     def __init__(self, **kwargs):
@@ -48,7 +52,7 @@ class DreamGenerationConfig(GenerationConfig):
         # diffusion specific params
         self.eps: float = kwargs.pop("eps", 1e-3)
         self.steps: int = kwargs.pop("steps", 512)
-        self.alg: str = kwargs.pop("alg", 'origin')
+        self.alg: str = kwargs.pop("alg", "origin")
         self.alg_temp: Optional[float] = kwargs.pop("alg_temp", None)
 
         # Parameters that define the output variables of `generate`
@@ -76,17 +80,23 @@ class DreamGenerationConfig(GenerationConfig):
             # we don't want to copy values from the model config if we're initializing a `GenerationConfig` from a
             # model's default configuration file
             for key, value in kwargs.items():
-                try:
-                    setattr(self, key, value)
-                except AttributeError as err:
-                    raise err
+                setattr(self, key, value)
 
         # Validate the values of the attributes
         self.validate(is_init=True)
 
     def validate(self, is_init=False):
-        pass
-    
+        if self.temperature < 0:
+            raise ValueError("temperature must be nonnegative")
+        if self.top_k is not None and (type(self.top_k) is not int or self.top_k <= 0):
+            raise ValueError("top_k must be a positive integer")
+        if self.top_p is not None and not 0 < self.top_p <= 1:
+            raise ValueError("top_p must be in (0, 1]")
+        if not 0 < self.eps < 1:
+            raise ValueError("eps must be in (0, 1)")
+        if self.alg not in ("origin", "topk", "topk_margin", "entropy"):
+            raise ValueError(f"Unsupported Dream algorithm: {self.alg}")
+
 
 def top_p_logits(logits, top_p=None):
     sorted_logits, sorted_indices = torch.sort(logits, descending=True)
@@ -98,109 +108,141 @@ def top_p_logits(logits, top_p=None):
 
     mask = torch.zeros_like(logits, dtype=torch.bool, device=logits.device)
     mask = mask.scatter_(-1, sorted_indices, sorted_indices_to_remove)
-    logits = logits.masked_fill(mask, torch.finfo(logits.dtype).min)
+    logits = logits.masked_fill(mask, -torch.inf)
     return logits
+
 
 def top_k_logits(logits, top_k=None):
     top_k = min(top_k, logits.size(-1))  # Safety check
     # Remove all tokens with a probability less than the last token of the top-k
     indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-    logits = logits.masked_fill(indices_to_remove, torch.finfo(logits.dtype).min)
+    logits = logits.masked_fill(indices_to_remove, -torch.inf)
     return logits
 
 
-def sample_tokens(logits, temperature=0.0, top_p=None, top_k=None, margin_confidence=False, neg_entropy=False):
-
+def sampling_logits(logits, temperature=0.0, top_p=None, top_k=None):
+    logits = logits.float()
     if temperature > 0:
         logits = logits / temperature
     if top_p is not None and top_p < 1:
         logits = top_p_logits(logits, top_p)
     if top_k is not None:
         logits = top_k_logits(logits, top_k)
-    probs = torch.softmax(logits, dim=-1)
+    return logits
+
+
+def sample_tokens(
+    logits, temperature=0.0, top_p=None, top_k=None, margin_confidence=False, neg_entropy=False
+):
+    logits = sampling_logits(logits, temperature, top_p, top_k)
+    probs = torch.softmax(logits.float(), dim=-1)
 
     if temperature > 0:
-        try:
-            x0 = dists.Categorical(probs=probs).sample()
-            confidence = torch.gather(probs, -1, x0.unsqueeze(-1)).squeeze(-1)
-        except:
-            confidence, x0 = probs.max(dim=-1)
+        x0 = dists.Categorical(probs=probs).sample()
+        confidence = torch.gather(probs, -1, x0.unsqueeze(-1)).squeeze(-1)
     else:
         confidence, x0 = probs.max(dim=-1)
-    
+
     if margin_confidence:
         sorted_probs, _ = torch.sort(probs, dim=-1, descending=True)
         # Extract top1 and top2 probabilities
-        top1_probs = sorted_probs[:, 0] 
-        top2_probs = sorted_probs[:, 1] 
+        top1_probs = sorted_probs[..., 0]
+        top2_probs = sorted_probs[..., 1]
         # Calculate confidence as top1 - top2
-        confidence = top1_probs - top2_probs 
-    
+        confidence = top1_probs - top2_probs
+
     if neg_entropy:
         epsilon = 1e-10
         log_probs = torch.log(probs + epsilon)
         confidence = torch.sum(probs * log_probs, dim=-1)
-    
+
     return confidence, x0
 
-class DREAM: 
-    def __init__(self, model, tokenizer, constraint_mode = 'original', steps = 128, gen_length = 128,
-                 block_length = 128, temperature = 0.0, cfg_scale = 0.0, remasking = 'low_confidence', constrain_at = 30, stop_word = None, stop_phrase = None):
-        
-        self.model = model 
-        self.tokenizer = tokenizer 
-        self.constraint_mode = constraint_mode 
-        self.steps = steps 
-        self.gen_length = gen_length 
-        self.block_length = block_length 
-        self.temperature = temperature 
-        self.cfg_scale = cfg_scale 
-        self.remasking = remasking 
+
+class DREAM:
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        constraint_mode="unconstrained",
+        steps=128,
+        gen_length=128,
+        block_length=128,
+        temperature=0.0,
+        cfg_scale=0.0,
+        remasking="low_confidence",
+        constrain_at=0,
+        stop_word=None,
+        stop_phrase=None,
+        require_complete=True,
+    ):
+
+        self.model = model
+        self.tokenizer = tokenizer
+        self.constraint_mode = constraint_mode
+        self.steps = steps
+        self.gen_length = gen_length
+        self.block_length = block_length
+        self.temperature = temperature
+        self.cfg_scale = cfg_scale
+        self.remasking = remasking
         self.constrain_at = constrain_at
+        self.require_complete = require_complete
         self.target_word = stop_word
         self.phrase = stop_phrase
-        
-    def __call__(self, prompt, dfa_store = None):
+
+    def __call__(self, prompt, dfa_store=None):
         if dfa_store is not None:
             self.dfa_store = dfa_store
-            self.edge_src = dfa_store.edge_src
-            self.edge_dst = dfa_store.edge_dst
-            self.edge_tok = dfa_store.edge_tok
-            self.edge_src_nomdm = self.dfa_store.edge_src_nomdm
-            self.edge_dst_nomdm = self.dfa_store.edge_dst_nomdm
-            self.edge_tok_nomdm = self.dfa_store.edge_tok_nomdm
-        
+
+        if self.cfg_scale != 0.0:
+            raise ValueError("Dream classifier-free guidance is not supported")
+        algorithms = {"low_confidence": "topk", "entropy": "entropy", "random": "origin"}
+        if self.remasking not in algorithms:
+            raise ValueError(f"Unsupported remasking strategy: {self.remasking}")
         inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
-        if self.constraint_mode in ['unconstrained', 'ar_constrained', 'diffusion_constrained']:
-            output_ids = self.generate(inputs.input_ids, inputs.attention_mask, constraint_mode=self.constraint_mode, max_new_tokens=self.gen_length,
-                                                output_history=False,
-                                                return_dict_in_generate=False,
-                                                steps=self.steps,
-                                                temperature=self.temperature,
-                                                alg="entropy",
-                                                alg_temp=0., 
-                                                top_k = None, 
-                                                top_p = None)
+        if self.constraint_mode in ["unconstrained", "ar_constrained", "diffusion_constrained"]:
+            output_ids = self.generate(
+                inputs.input_ids,
+                inputs.attention_mask,
+                constraint_mode=self.constraint_mode,
+                max_new_tokens=self.gen_length,
+                output_history=False,
+                return_dict_in_generate=False,
+                steps=self.steps,
+                temperature=self.temperature,
+                alg=algorithms[self.remasking],
+                alg_temp=0.0,
+                top_k=None,
+                top_p=None,
+            )
         else:
             raise ValueError(f"Invalid constraint mode: {self.constraint_mode}")
-        return self.tokenizer.batch_decode(output_ids[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0]
-    
+        return self.tokenizer.batch_decode(
+            output_ids[:, inputs.input_ids.shape[1] :],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
 
     @torch.no_grad()
     def generate(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
-        constraint_mode: str = 'original',
+        constraint_mode: str = "unconstrained",
         **kwargs,
     ) -> Union[torch.LongTensor]:
-        kwargs['mask_token_id'] = self.tokenizer.mask_token_id
+        kwargs["mask_token_id"] = self.tokenizer.mask_token_id
         generation_config = self.model.generation_config
-    
+
         # 1. Handle `generation_config` and kwargs that might update it, and validate the `.generate()` call
         generation_config = self.model._prepare_generation_config(generation_config, **kwargs)
-        generation_tokens_hook_func = kwargs.pop("generation_tokens_hook_func", lambda step, x, logits: x)
-        generation_logits_hook_func = kwargs.pop("generation_logits_hook_func", lambda step, x, logits: logits)
+        generation_tokens_hook_func = kwargs.pop(
+            "generation_tokens_hook_func", lambda step, x, logits: x
+        )
+        generation_logits_hook_func = kwargs.pop(
+            "generation_logits_hook_func", lambda step, x, logits: logits
+        )
 
         # 2. Define model inputs
         device = input_ids.device
@@ -208,15 +250,19 @@ class DREAM:
 
         # 3. Prepare `max_length`.
         input_ids_length = input_ids.shape[-1]
-        has_default_max_length = kwargs.get("max_length") is None and generation_config.max_length is not None
+        has_default_max_length = (
+            kwargs.get("max_length") is None and generation_config.max_length is not None
+        )
         generation_config = self.model._prepare_generated_length(
             generation_config=generation_config,
             has_default_max_length=has_default_max_length,
             input_ids_length=input_ids_length,
         )
 
-        self.model._validate_generated_length(generation_config, input_ids_length, has_default_max_length)
-        
+        self.model._validate_generated_length(
+            generation_config, input_ids_length, has_default_max_length
+        )
+
         # 4. Check input_ids
         if not is_torchdynamo_compiling() and self.model.device.type != input_ids.device.type:
             warnings.warn(
@@ -227,37 +273,37 @@ class DREAM:
                 f" correct device by calling for example input_ids = input_ids.to('{self.model.device.type}') before"
                 " running `.generate()`.",
                 UserWarning,
+                stacklevel=2,
             )
         if (
-            hasattr(generation_config, "pad_token_id") and
-            torch.any(input_ids == generation_config.pad_token_id) and 
-            attention_mask is None
+            hasattr(generation_config, "pad_token_id")
+            and torch.any(input_ids == generation_config.pad_token_id)
+            and attention_mask is None
         ):
             warnings.warn(
                 "Padding was detected but no attention mask is passed here. For correct "
                 "generation results, please set `attention_mask` when batch-padding inputs.",
                 UserWarning,
+                stacklevel=2,
             )
 
         input_ids, attention_mask = self.model._expand_inputs_for_generation(
             expand_size=generation_config.num_return_sequences,
             input_ids=input_ids,
-            attention_mask=attention_mask 
+            attention_mask=attention_mask,
         )
 
-        
         result = self.constrained_sample(
             input_ids,
             attention_mask=attention_mask,
             generation_config=generation_config,
             generation_tokens_hook_func=generation_tokens_hook_func,
-            generation_logits_hook_func=generation_logits_hook_func, 
-            constraint_mode=constraint_mode
+            generation_logits_hook_func=generation_logits_hook_func,
+            constraint_mode=constraint_mode,
         )
 
-        
         return result
-    
+
     def constrained_sample(
         self,
         input_ids: torch.LongTensor,
@@ -265,7 +311,7 @@ class DREAM:
         generation_config: DreamGenerationConfig,
         generation_tokens_hook_func,
         generation_logits_hook_func,
-        constraint_mode: str = None
+        constraint_mode: str = None,
     ) -> Union[torch.LongTensor]:
         # init values
         output_history = generation_config.output_history
@@ -273,29 +319,40 @@ class DREAM:
         max_length = generation_config.max_length
         mask_token_id = generation_config.mask_token_id
         steps_total = generation_config.steps
-        
-        if constraint_mode in ['diffusion_constrained', 'ar_constrained']:
-            assert self.constrain_at is not None
+        DreamGenerationConfig(
+            **{
+                name: getattr(generation_config, name)
+                for name in ("temperature", "top_k", "top_p", "eps", "alg")
+            }
+        )
 
-
+        constrained = constraint_mode in ("diffusion_constrained", "ar_constrained")
+        steps_per_block = validate_generation_settings(
+            steps_total,
+            self.gen_length,
+            self.block_length,
+            self.constrain_at,
+            constraint_mode,
+            input_ids.shape[0],
+        )
+        if max_length != input_ids.shape[1] + self.gen_length:
+            raise ValueError("max_new_tokens must equal the configured gen_length")
+        if constrained and not hasattr(self, "dfa_store"):
+            raise ValueError("Constrained generation requires a DFA store")
+        if constrained:
+            reset_decode_validation(self.dfa_store)
         histories = [] if (return_dict_in_generate and output_history) else None
-
-        assert self.gen_length % self.block_length == 0, "max_length must be divisible by block_length"
         num_blocks = self.gen_length // self.block_length
-        assert steps_total % num_blocks == 0, "steps must be divisible by num_blocks"
-        steps_per_block  = steps_total // num_blocks
-        
         # pad input_ids to max_length
         x = F.pad(input_ids, (0, max_length - input_ids.shape[1]), value=mask_token_id)
 
-        if constraint_mode == 'diffusion_constrained':
-            num_states = self.dfa_store.num_states
-            cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
-            cost_vector[self.dfa_store.initial_state] = 0.0
+        state = self.dfa_store.initial_state if constrained else None
 
         if attention_mask is not None and torch.any(attention_mask == 0.0):
             # we do not mask the [MASK] tokens so value = 1.0
-            attention_mask = F.pad(attention_mask, (0, max_length - attention_mask.shape[1]), value=1.0)
+            attention_mask = F.pad(
+                attention_mask, (0, max_length - attention_mask.shape[1]), value=1.0
+            )
             tok_idx = attention_mask.long().cumsum(-1) - 1
             tok_idx.masked_fill_(attention_mask == 0, 1)
             # attention_mask is of shape [B, N]
@@ -307,172 +364,103 @@ class DREAM:
         else:
             tok_idx = None
             attention_mask = "full"
-        
+
         for num_block in range(num_blocks):
             start_gen_idx = input_ids.shape[1] + num_block * self.block_length
-            end_gen_idx   = input_ids.shape[1] + (num_block + 1) * self.block_length
+            end_gen_idx = input_ids.shape[1] + (num_block + 1) * self.block_length
 
             # pre-compute constant-expected-reveal schedule
-            block_mask_init = (x[:, start_gen_idx:end_gen_idx] == mask_token_id)
-            k_per_step = get_num_transfer_tokens(block_mask_init, steps_per_block)
-            
-            timesteps = torch.linspace(1, generation_config.eps,
-                                   steps_per_block + 1, device=x.device)
-            
-            active_block_mask = _active_block_mask(x.size(1), slice(start_gen_idx, end_gen_idx),
-                                               x.device, x.size(0))
-            
-            opp_stop = False
-            logits_opt = None
+            k_per_step = reveal_schedule(self.block_length, steps_per_block)
+
+            timesteps = torch.linspace(
+                1, generation_config.eps, steps_per_block + 1, device=x.device
+            )
+
             for i in range(steps_per_block):
-                mask_all   = (x == mask_token_id)
-                mask_block = mask_all & active_block_mask
-
-                logits = self.model(x, attention_mask, None).logits
+                active_x = x[:, :end_gen_idx]
+                active_attention = (
+                    attention_mask[:, :, :end_gen_idx, :end_gen_idx]
+                    if isinstance(attention_mask, torch.Tensor)
+                    else attention_mask
+                )
+                active_positions = tok_idx[:, :end_gen_idx] if tok_idx is not None else None
+                logits = self.model(active_x, active_attention, active_positions).logits
                 logits = torch.cat([logits[:, :1], logits[:, :-1]], dim=1)
-                logits = generation_logits_hook_func(i, x, logits)
-                if logits_opt is None: 
-                    logits_opt = torch.full_like(logits, -float('inf')).to(x.device)
-                    logits_opt[:, :, mask_token_id] = 0.0
-
-                mask_logits = logits[mask_block]
-                
+                logits = generation_logits_hook_func(i, active_x, logits)
+                logits = logits.float().clone()
+                logits[:, :, mask_token_id] = -torch.inf
+                block_logits = logits[:, start_gen_idx:end_gen_idx]
+                masked = x[:, start_gen_idx:end_gen_idx] == mask_token_id
+                kwargs = dict(
+                    temperature=generation_config.temperature,
+                    top_p=generation_config.top_p,
+                    top_k=generation_config.top_k,
+                    margin_confidence=(generation_config.alg == "topk_margin"),
+                    neg_entropy=(generation_config.alg == "entropy"),
+                )
+                conf, new_ids = sample_tokens(block_logits, **kwargs)
                 if generation_config.alg == "origin":
-                    p_t = 1 - timesteps[i+1] / timesteps[i] if i < steps_per_block-1 else 1
-                    rand_take = torch.rand(mask_logits.shape[0], device=x.device) < p_t
-                    _, new_ids = sample_tokens(mask_logits[rand_take],
-                                            temperature=generation_config.temperature,
-                                            top_p=generation_config.top_p,
-                                            top_k=generation_config.top_k)
-                    x_tmp = torch.full_like(mask_logits, mask_token_id, dtype=torch.long)
-                    x_tmp[rand_take] = new_ids
-                    x[mask_block] = x_tmp                              ### FIX restrict
+                    p_t = 1 - timesteps[i + 1] / timesteps[i] if i < steps_per_block - 1 else 1
+                    transfer = (torch.rand_like(conf) < p_t) & masked
                 else:
-                    kwargs = dict(
-                        temperature=generation_config.temperature,
-                        top_p=generation_config.top_p,
-                        top_k=generation_config.top_k,
-                        margin_confidence=(generation_config.alg == "topk_margin"),
-                        neg_entropy       =(generation_config.alg == "entropy"),
-                    )
-                    conf, new_ids = sample_tokens(mask_logits, **kwargs)
-
-                    # block-wide confidence tensor
-                    conf_full = torch.full_like(x, -torch.inf, dtype=logits.dtype)
-                    conf_full[mask_block] = conf
-                    # exclude *future* blocks
-                    conf_full[:, end_gen_idx:] = -torch.inf              ### FIX future leak
-
-                    # how many to reveal this step / batch
-                    transfer = torch.zeros_like(mask_block, dtype=torch.bool)
-                    for b_id in range(x.size(0)):
-                        k = int(k_per_step[b_id, i])
-                        if k == 0:
-                            continue
-                        k = min(k, mask_block[b_id].sum().item())       ### FIX corner
-                        if k == 0:
-                            continue
-                        _, top_idx = torch.topk(conf_full[b_id], k)
-                        transfer[b_id, top_idx] = True
-
-                    # write new ids
-                    x_write = torch.full_like(x, mask_token_id)
-                    x_write[mask_block] = new_ids
-                    x[transfer] = x_write[transfer]
-                    logits_opt[transfer] = logits[transfer]
-
+                    k = k_per_step[i]
+                    # Keep the original prompt+block topk shape: its tie
+                    # choices affect later model conditioning.
+                    confidence = torch.full_like(active_x, -torch.inf, dtype=conf.dtype)
+                    confidence[:, start_gen_idx:end_gen_idx] = conf.masked_fill(~masked, -torch.inf)
+                    transfer = torch.zeros_like(masked)
+                    if k:
+                        indices = confidence.topk(k, dim=-1).indices - start_gen_idx
+                        transfer.scatter_(1, indices.clamp(0, self.block_length - 1), True)
+                    transfer &= masked
+                x[:, start_gen_idx:end_gen_idx] = torch.where(
+                    transfer, new_ids, x[:, start_gen_idx:end_gen_idx]
+                )
 
                 # this allows user-defined token control of the intermediate steps
-                x = generation_tokens_hook_func(i, x, logits)
+                x[:, :end_gen_idx] = generation_tokens_hook_func(i, active_x, logits)
 
-                if self.constrain_at is not None and i >= self.constrain_at: 
-                    target_idx = -1
-                    if self.target_word is not None and self.phrase is not None:
-                        decoded_gen = self.tokenizer.decode(x[0, input_ids.shape[1]:end_gen_idx])
-                        target_idx = find_target_after_phrase_str(decoded_gen, self.phrase, self.target_word)
-                        if target_idx != -1:
-                            decoded_gen = target_idx
-
-                        
-                        tokd_gen = self.tokenizer(decoded_gen).input_ids
-                    else:
-                        tokd_gen = x[0, input_ids.shape[1]:end_gen_idx].tolist()
-                    
-                    if target_idx != -1 and constraint_mode == 'unconstrained':
-                        opp_stop = True 
-                    
-                    if constraint_mode == 'ar_constrained':
-                        if not self.dfa_store.enable_oppurtunistic or not self.dfa_store.check_is_reachable(tokd_gen, is_final_block = num_block == num_blocks - 1):
-                            gen_ids = []                           # tokens we’ve accepted so far
-                            ar_prefix = x[:, input_ids.shape[1]:start_gen_idx]
-                            for j in range(start_gen_idx, end_gen_idx):
-                                # 1. context ids that the processor will see
-                                ar_x = torch.cat(
-                                    [ar_prefix,  # frozen prefix
-                                    torch.tensor(gen_ids, device=x.device).unsqueeze(0)],  # generated so far
-                                    dim=1,
-                                )
-                                
-                                current_logits = logits[:, j:j+1, :]
-                                if i < steps_per_block - 1:
-                                    mask_block = (x[:, j:j+1] == mask_token_id)[0]  
-                                    if mask_block.any():
-                                        current_logits[0, mask_block, :] = float('-inf')
-                                        current_logits[0, mask_block, mask_token_id] = 0.0
-
-                                current_logits = self.dfa_store.ar_logits_process(ar_x, current_logits)
-                                
-                                next_token = current_logits.argmax(-1).squeeze(1)   # greedy; replace with sampler if desired
-                                gen_ids.append(next_token)
-
-                            
-                            if gen_ids: 
-                                x[:, start_gen_idx:end_gen_idx] = torch.stack(gen_ids, dim=1)
-                            
-                    elif constraint_mode == 'diffusion_constrained':
-                        if self.dfa_store.enable_oppurtunistic and self.dfa_store.check_is_reachable(tokd_gen, is_final_block = num_block == num_blocks - 1):
-                            if target_idx != -1: 
-                                opp_stop = True 
-                            else:
-                                if i == steps_per_block - 1:
-                                    best_intermediate_state, some_error = self.dfa_store.traverse_token_path(x[0, start_gen_idx:end_gen_idx].tolist(), cost_vector.argmax().item())
-                                    if some_error:
-                                        raise ValueError(f"Error in traversing token path for seq {self.tokenizer.decode(x[0, start_gen_idx:end_gen_idx].tolist())}")
-                        else:
-                            gen_log_probs = F.log_softmax(logits_opt[:, start_gen_idx:end_gen_idx, :], dim=-1)[0]
-                                
-                            current_cost, selected_tokens, selected_sources = viterbi_block(
-                                self.edge_src if i != steps_per_block - 1 else self.edge_src_nomdm,
-                                self.edge_dst if i != steps_per_block - 1 else self.edge_dst_nomdm,
-                                self.edge_tok if i != steps_per_block - 1 else self.edge_tok_nomdm,
-                                gen_log_probs,
-                                cost_vector
-                            )
-                            
-                            if num_block == num_blocks - 1:
-                                best_intermediate_state = self.dfa_store.final_states[torch.argmax(current_cost[self.dfa_store.final_states])]
-                            else:
-                                best_intermediate_state = torch.argmax(current_cost)
-                            
-                            token_path = []
-                            current_state = best_intermediate_state
-                            for t in range(self.block_length - 1, - 1, -1):
-                                tok = selected_tokens[t][current_state].item()  
-                                token_path.append(tok)
-                                current_state = selected_sources[t][current_state].item() 
-                            token_path.reverse()
-                            x[:, start_gen_idx:end_gen_idx] = torch.tensor(token_path, dtype=torch.long, device=x.device)
+                if constrained and i >= self.constrain_at:
+                    path, end_state = decode_block(
+                        self.dfa_store,
+                        sampling_logits(
+                            logits[0, start_gen_idx:end_gen_idx],
+                            generation_config.temperature,
+                            generation_config.top_p,
+                            generation_config.top_k,
+                        ),
+                        x[0, start_gen_idx:end_gen_idx] == mask_token_id,
+                        state,
+                        x.shape[1] - end_gen_idx,
+                        require_complete=self.require_complete,
+                        greedy=constraint_mode == "ar_constrained",
+                        defer_validation=True,
+                    )
+                    x[0, start_gen_idx:end_gen_idx] = path
+                if i == steps_per_block - 1:
+                    if constrained:
+                        validate_decode_block(self.dfa_store, x.device)
+                    stopped = completed_stop_prefix(
+                        x,
+                        input_ids.shape[1],
+                        end_gen_idx,
+                        self.tokenizer,
+                        mask_token_id,
+                        self.phrase,
+                        self.target_word,
+                        self.dfa_store if constrained else None,
+                    )
+                    if stopped is not None:
+                        if return_dict_in_generate:
+                            return ModelOutput(sequences=stopped, history=histories)
+                        return stopped
 
                 if histories is not None:
                     histories.append(x.clone())
-        
-            if opp_stop: 
-                return x
-            
-            if constraint_mode == 'diffusion_constrained': 
-                cost_vector = torch.full((num_states, ), fill_value=-float('inf'), dtype=torch.float, device=x.device)
-                cost_vector[best_intermediate_state] = 0.0
 
+            if constrained:
+                state = end_state
+
+        if return_dict_in_generate:
+            return ModelOutput(sequences=x, history=histories)
         return x
-    
-    

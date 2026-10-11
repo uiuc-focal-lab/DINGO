@@ -1,20 +1,22 @@
-from syncode.mask_store.byte_tokenizer import ByteTokenizer
-import torch
-import os
-from pathlib import Path
-from grammar_folder.grammar_to_regex import lark_to_regex
-import rust_dfa
-import hashlib
-import sys
-import dill
-from collections import defaultdict
-from tqdm import tqdm
-from outlines_core.json_schema import build_regex_from_schema
-import re
-from copy import deepcopy
 import collections
+import hashlib
+import json
+import os
+import sys
+import tempfile
 import time
+from collections import defaultdict
+from pathlib import Path
+
+import dill
 import numpy as np
+import torch
+from tqdm import tqdm
+
+import rust_dfa
+from grammar_folder.grammar_to_regex import lark_to_regex
+from tokenization import get_mask_token_id, tokenizer_preprocessing
+
 
 def sha256_digest(s: str) -> str:
     """Get the sha256 digest of a string
@@ -23,25 +25,25 @@ def sha256_digest(s: str) -> str:
     a FIPS-enabled system.
     """
     if sys.version_info >= (3, 9):
-        return hashlib.sha256(s.encode('utf8'), usedforsecurity=False).hexdigest()
+        return hashlib.sha256(s.encode("utf8"), usedforsecurity=False).hexdigest()
     else:
-        return hashlib.sha256(s.encode('utf8')).hexdigest()
-        
+        return hashlib.sha256(s.encode("utf8")).hexdigest()
+
 
 class DFAMatrixStore:
     def __init__(self, task_name, do_cot=False, enable_oppurtunistic=False):
         self.task_name = task_name
-        self.suffix = 'cot' if do_cot else 'std'
+        self.suffix = "cot" if do_cot else "std"
         self.enable_oppurtunistic = enable_oppurtunistic
-    
+
     def get_tok_name(self, tokenizer):
-        if 'llada' in tokenizer.name_or_path.lower():
-            return 'llada'
-        elif 'dream' in tokenizer.name_or_path.lower():
-            return 'dream'
+        if "llada" in tokenizer.name_or_path.lower():
+            return "llada"
+        elif "dream" in tokenizer.name_or_path.lower():
+            return "dream"
         else:
             raise ValueError(f"Tokenizer {tokenizer.name_or_path} not supported")
-    
+
     @classmethod
     def load_obj(cls, filename: str):
         """
@@ -49,104 +51,104 @@ class DFAMatrixStore:
         Returns:
             An object of type cls, reconstructed from the file.
         """
-        with open(filename, 'rb') as f:
+        with open(filename, "rb") as f:
             obj = dill.load(f)
         # Optional: check that the loaded object is indeed an instance of cls
         if not isinstance(obj, cls):
             raise TypeError(f"Loaded object is not a {cls.__name__}")
         return obj
-    
+
     def load_regex_dfa(self, schema, idx, grammar_string):
         if schema is not None:
             pattern = schema
         else:
             pattern_dict = lark_to_regex(grammar_string)
-            pattern = pattern_dict['start']
+            pattern = pattern_dict["start"]
 
             self.grammar_hash = sha256_digest(grammar_string)
 
         dfa = rust_dfa.RegexDFA()
         dfa.initialize(pattern)
         return dfa
-    
+
+    def __getstate__(self):
+        state = {k: v for k, v in self.__dict__.items() if not k.startswith("_runtime_")}
+        state.pop("dfa", None)  # PyO3 extension objects are not pickleable.
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.dfa = rust_dfa.RegexDFA()
+        self.dfa.initialize(self.pattern)
+
     def load(self, schema, idx, tokenizer):
+        for key in list(self.__dict__):
+            if key.startswith("_runtime_"):
+                del self.__dict__[key]
         current_file_dir = os.path.dirname(os.path.abspath(__file__))
-        if schema is not None:
-            self.fpath = f'{current_file_dir}/dfa_store/{self.task_name}_schema{idx}_{self.get_tok_name(tokenizer)}.dill'
-            if os.path.exists(self.fpath):
-                old_obj = self.load_obj(self.fpath)
-                old_obj.dfa = self.load_regex_dfa(schema, idx, None)
-                return old_obj, None
-            else:
-                return None, None
-
+        grammar_string = None
+        if schema is None:
+            grammar_path = f"{current_file_dir}/grammar_folder/{self.task_name}_{self.suffix}.lark"
+            with open(grammar_path) as f:
+                grammar_string = f.read()
+            pattern = lark_to_regex(grammar_string)["start"]
         else:
-            self.fpath = f'{current_file_dir}/dfa_store/{self.task_name}_{self.suffix}_{self.get_tok_name(tokenizer)}.dill'
-            grammar_path = f'{current_file_dir}/grammar_folder/{self.task_name}_{self.suffix}.lark'
-            if os.path.exists(grammar_path):
-                with open(grammar_path, 'r') as f:
-                    grammar_string = f.read()
-                
-            else:
-                raise FileNotFoundError(f"Grammar not found at {grammar_path}")
+            pattern = schema
+        self.pattern = pattern
+        self.mask_token_id = get_mask_token_id(tokenizer)
+        preprocessing = tokenizer_preprocessing(tokenizer)
+        self.vocab_bytes = preprocessing.vocab_bytes
+        self._runtime_tokenizer_preprocessing = preprocessing
+        # Content-addressed caches invalidate old mask/regex semantics as well
+        # as schema edits and tokenizer revisions. Runtime options are not cached.
+        digest = hashlib.sha256()
+        digest.update(
+            json.dumps(
+                [
+                    6,
+                    pattern,
+                    preprocessing.fingerprint,
+                ]
+            ).encode()
+        )
+        self.fpath = f"{current_file_dir}/dfa_store/{self.task_name}_{digest.hexdigest()}.dill"
+        if os.path.exists(self.fpath):
+            obj = self.load_obj(self.fpath)
+            obj.enable_oppurtunistic = self.enable_oppurtunistic
+            return obj, grammar_string
+        return None, grammar_string
 
-            if os.path.exists(self.fpath):
-                old_obj = self.load_obj(self.fpath) 
-                if old_obj.grammar_hash == sha256_digest(grammar_string): 
-                    old_obj.dfa = self.load_regex_dfa(None, None, grammar_string)
-                    return old_obj, grammar_string  
-                else:
-                    os.remove(self.fpath)
-                    return None, grammar_string
-            else:
-                return None, grammar_string
-                
     def build_augment_token_transitions(self, dfa, tokenizer, final_states):
-        byte_tokenizer = ByteTokenizer(tokenizer)
-        vocab = byte_tokenizer.byte_vocab
-        dfa.compute_token_transitions(vocab)
+        by_bytes = defaultdict(list)
+        special_ids = set(tokenizer.all_special_ids)
+        special_ids.add(self.mask_token_id)
+        # convert_tokens_to_ids may return the ordinary UNK ID for an absent
+        # EOT spelling; membership in the vocabulary is the authoritative test.
+        eot_id = self._runtime_tokenizer_preprocessing.eot_id
+        if eot_id is not None:
+            special_ids.add(eot_id)
+        if tokenizer.eos_token_id is not None:
+            special_ids.add(tokenizer.eos_token_id)
+        for token_id, token_bytes in self.vocab_bytes.items():
+            if token_id not in special_ids:
+                by_bytes[token_bytes].append(token_id)
+        dfa.compute_token_transitions(dict(by_bytes))
         token_transitions = dfa.get_all_token_transitions()
-        
-        eot_id = tokenizer.convert_tokens_to_ids('<|eot_id|>')
-        new_token_transition = deepcopy(token_transitions)
-        for (state, token_id), next_state in token_transitions.items():
-            if token_id in tokenizer.all_special_ids + [eot_id]:
-                del new_token_transition[(state, token_id)]
-        
-        token_transitions = new_token_transition
-        # Add transitions for EOS and EOT tokens between final states
-        for final_state in final_states:
-            if eot_id is not None:
-                token_transitions[(final_state, eot_id)] = final_state
-            if tokenizer.eos_token_id is not None:
-                token_transitions[(final_state, tokenizer.eos_token_id)] = final_state
-        
-        # Collect all unique states from transitions
-        all_states = set()
-        for (src_state, _), dst_state in token_transitions.items():
-            all_states.add(src_state)
-            if dst_state is not None:
-                all_states.add(dst_state)
-        
-        
-        if 'llada' in tokenizer.name_or_path.lower():
-            for state in all_states: 
-                token_transitions[(state, 126336)] = state  
-        elif 'dream' in tokenizer.name_or_path.lower():
-            for state in all_states: 
-                token_transitions[(state, tokenizer.mask_token_id)] = state  
-
-        if 'llada' in tokenizer.name_or_path.lower():
-            for state in all_states: 
-                token_transitions[(state, 126336)] = state  
-        elif 'dream' in tokenizer.name_or_path.lower():
-            for state in all_states: 
-                token_transitions[(state, tokenizer.mask_token_id)] = state  
-
+        # Invisible termination/padding tokens are allowed only at acceptance.
+        # No artificial mask self-loop: every mask edge must have a real-token
+        # witness, as required by Section 4.1.
+        for state in final_states:
+            for token_id in (eot_id, tokenizer.eos_token_id):
+                if token_id is not None and token_id != self.mask_token_id:
+                    token_transitions[(state, token_id)] = state
+        all_states = {dfa.get_initial_state(), *final_states}
+        for (src, _), dst in token_transitions.items():
+            all_states.update((src, dst))
         return token_transitions, all_states
 
-    def build_sparse_edges(self, transitions_by_state: dict[int, dict[int, torch.Tensor]],
-                        mask_token_id: int):
+    def build_sparse_edges(
+        self, transitions_by_state: dict[int, dict[int, torch.Tensor]], mask_token_id: int
+    ):
         """
         Parameters
         ----------
@@ -176,9 +178,9 @@ class DFAMatrixStore:
                 tok.append(mask_token_id)
 
         edge_triplets = torch.tensor(
-            list(zip(src, dst, tok)),          # shape [E,3] on CPU
-            dtype=torch.long
-        )
+            list(zip(src, dst, tok, strict=True)),  # shape [E,3] on CPU
+            dtype=torch.long,
+        ).reshape(-1, 3)
 
         # ---------- deduplicate triplets (cost O(E log E)) ----------
         edge_triplets = torch.unique(edge_triplets, dim=0)
@@ -191,103 +193,76 @@ class DFAMatrixStore:
         edge_tok = edge_tok[dst_order]
 
         return edge_src, edge_dst, edge_tok
-    
+
     def build(self, schema, idx, tokenizer):
-        new_obj, grammar_string = self.load(schema, idx, tokenizer)
-        if new_obj is not None:
-            return new_obj
-        
+        cached, grammar_string = self.load(schema, idx, tokenizer)
+        if cached is not None:
+            return cached
         dfa = self.load_regex_dfa(schema, idx, grammar_string)
-        
-        # Get initial state and final states using the new methods
-        initial_state = dfa.get_initial_state()
-        final_states = dfa.get_final_states()
-
-        token_transitions, all_states = self.build_augment_token_transitions(dfa, tokenizer, final_states)
-
-        # Create a mapping from original state IDs to consecutive integers
-        self.state_mapping = {old_id: new_id for new_id, old_id in enumerate(sorted(all_states))}
-        self.debug_state_mapping = {new_id: old_id for new_id, old_id in enumerate(sorted(all_states))}
-        
-        # Remap all state IDs in the transitions dictionary
-        remapped_token_transitions = {}
-        for (state, token_id), next_state in token_transitions.items():
-            new_state = self.state_mapping[state]
-            new_next_state = self.state_mapping[next_state] if next_state is not None else None
-            remapped_token_transitions[(new_state, token_id)] = new_next_state
-        
-        # Update token_transitions to use the remapped states
-        token_transitions = remapped_token_transitions
-        
-        # Remap initial state and final states
-        initial_state = self.state_mapping[initial_state]
-        final_states = [self.state_mapping[fs] for fs in final_states]
-        
-        # Print mapping information
-        print(f"Remapped {len(all_states)} states to consecutive IDs from 0 to {len(all_states) - 1}")
-        num_states = len(all_states)
-
-        # Group transitions by starting state and next state
-        transitions_by_state = {}
-        for (state, token_id), next_state in token_transitions.items():
-            if next_state is not None:  # Only consider valid transitions
-                if state not in transitions_by_state:
-                    transitions_by_state[state] = {}
-                if next_state not in transitions_by_state[state]:
-                    transitions_by_state[state][next_state] = []
-                transitions_by_state[state][next_state].append(token_id)
-        
-        # For each state, store the tokens that can be used to transition to any valid next state
+        finals = dfa.get_final_states()
+        transitions, states = self.build_augment_token_transitions(dfa, tokenizer, finals)
+        self.state_mapping = {old: new for new, old in enumerate(sorted(states))}
+        self.debug_state_mapping = {new: old for old, new in self.state_mapping.items()}
+        self.initial_state = self.state_mapping[dfa.get_initial_state()]
+        self.final_states = sorted(self.state_mapping[s] for s in finals)
+        self.num_states = len(states)
+        transitions = {
+            (self.state_mapping[s], t): self.state_mapping[d] for (s, t), d in transitions.items()
+        }
+        # Character liveness is insufficient for a restricted vocabulary.
+        # Compute co-accessibility over real token transitions (Section 4.1).
+        src = torch.tensor([s for s, _ in transitions], dtype=torch.long)
+        dst = torch.tensor(list(transitions.values()), dtype=torch.long)
+        self.dst_to_final = self.precompute_back_dist(self.num_states, src, dst, self.final_states)
+        self.live_states = (
+            (self.dst_to_final < torch.iinfo(torch.long).max).nonzero().flatten().tolist()
+        )
+        live = set(self.live_states)
+        if self.initial_state not in live:
+            raise ValueError("Constraint has no tokenizable completion in this vocabulary")
+        transitions = {(s, t): d for (s, t), d in transitions.items() if s in live and d in live}
+        grouped = defaultdict(lambda: defaultdict(list))
+        for (s, token), d in transitions.items():
+            grouped[s][d].append(token)
         self.state_to_valid_transitions = {}
-        for state, transitions in transitions_by_state.items():
-            # Create a boolean mask for the valid transitions   
-            self.state_to_valid_transitions[state] = torch.zeros(len(tokenizer), dtype=torch.bool)
-            for next_state, token_ids in transitions.items():
-                self.state_to_valid_transitions[state][token_ids] = True
-
-        if 'llada' in tokenizer.name_or_path.lower():
-            mask_id = 126336
-        elif 'dream' in tokenizer.name_or_path.lower():
-            mask_id = tokenizer.mask_token_id
-        else:
-            raise ValueError(f"Tokenizer {tokenizer.name_or_path} not supported")
-
-        edge_src, edge_dst, edge_tok = self.build_sparse_edges(transitions_by_state, mask_id)
-        edge_is_mdm = (edge_tok == mask_id) 
-
-        # convert token transitions to NFA due to mask_id  
-        new_token_transitions = defaultdict(list)
-        for (src_state, token_id), dst_state in token_transitions.items():
-            new_token_transitions[(src_state, token_id)].append(dst_state)
-            new_token_transitions[(src_state, mask_id)].append(dst_state)
-            
-        token_transitions = dict(new_token_transitions)
-        # ---------- save to the DFA store ---------------------------------
-        self.initial_state = initial_state
-        self.final_states  = sorted(final_states)
-        self.edge_src      = edge_src           # tensors live on CPU for now
-        self.edge_dst      = edge_dst
-        self.edge_tok      = edge_tok
-        self.edge_src_nomdm = self.edge_src[~edge_is_mdm]
-        self.edge_dst_nomdm = self.edge_dst[~edge_is_mdm]
-        self.edge_tok_nomdm = self.edge_tok[~edge_is_mdm]
-        self.num_states    = num_states
-        self.token_transitions = token_transitions
-        self.decoded_mask_id = tokenizer.decode(mask_id)
+        for s, destinations in grouped.items():
+            valid = {token for tokens in destinations.values() for token in tokens}
+            valid.add(self.mask_token_id)
+            self.state_to_valid_transitions[s] = torch.tensor(sorted(valid), dtype=torch.long)
+        self.edge_src, self.edge_dst, self.edge_tok = self.build_sparse_edges(
+            grouped, self.mask_token_id
+        )
+        real = self.edge_tok != self.mask_token_id
+        self.edge_src_nomdm = self.edge_src[real]
+        self.edge_dst_nomdm = self.edge_dst[real]
+        self.edge_tok_nomdm = self.edge_tok[real]
+        nfa = defaultdict(set)
+        for (s, token), d in transitions.items():
+            nfa[(s, token)].add(d)
+            nfa[(s, self.mask_token_id)].add(d)
+        self.token_transitions = {k: sorted(v) for k, v in nfa.items()}
+        self.acceptance_can_pad = all(
+            any(s == d for (q, _), d in transitions.items() if q == s) for s in self.final_states
+        )
+        self.decoded_mask_id = tokenizer.decode(self.mask_token_id)
         self.eos_token_id = tokenizer.eos_token_id
-        # self.dst_to_final = self.precompute_back_dist(num_states, self.edge_src_nomdm, self.edge_dst_nomdm, final_states)
-        
-        Path(self.fpath).parent.mkdir(parents=True, exist_ok=True) 
-        with open(self.fpath, 'wb') as f:
-            dill.dump(self, f)
-        
+        del self.vocab_bytes  # only needed for preprocessing and the fingerprint
+        del self._runtime_tokenizer_preprocessing
         self.dfa = dfa
+        Path(self.fpath).parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=Path(self.fpath).parent, delete=False) as f:
+            temp_path = f.name
+            dill.dump(self, f)
+        os.replace(temp_path, self.fpath)
         return self
 
-    def precompute_back_dist(self, num_states      : int,
-                            edge_src        : torch.Tensor,   # [E]
-                            edge_dst        : torch.Tensor,   # [E]
-                            final_states    : list[int]):
+    def precompute_back_dist(
+        self,
+        num_states: int,
+        edge_src: torch.Tensor,  # [E]
+        edge_dst: torch.Tensor,  # [E]
+        final_states: list[int],
+    ):
         """
         Returns
         -------
@@ -298,12 +273,13 @@ class DFAMatrixStore:
 
         # ---- build reverse adjacency on CPU ----
         rev_adj = [[] for _ in range(num_states)]
-        for s, d in zip(edge_src.tolist(), edge_dst.tolist()):
-            rev_adj[d].append(s)                    # edge d→s in the *reverse* graph
+        for s, d in zip(edge_src.tolist(), edge_dst.tolist(), strict=True):
+            rev_adj[d].append(s)  # edge d→s in the *reverse* graph
 
         # ---- multi-source BFS from all finals ----
-        dist = [float('inf')] * num_states
-        dq   = collections.deque()
+        unreachable = torch.iinfo(torch.long).max
+        dist = [unreachable] * num_states
+        dq = collections.deque()
 
         for f in final_states:
             dist[f] = 0
@@ -312,85 +288,106 @@ class DFAMatrixStore:
         while dq:
             v = dq.popleft()
             for u in rev_adj[v]:
-                if dist[u] == float('inf'):
+                if dist[u] == unreachable:
                     dist[u] = dist[v] + 1
                     dq.append(u)
 
         return torch.tensor(dist, dtype=torch.long)
 
-    def validate(self, code, is_final_block = False, last_step = False):
-        if self.enable_oppurtunistic:
-            if last_step:
-                if is_final_block:
-                    return self.dfa.matches(code)
-                else:
-                    return self.dfa.prefix_matches(code)
-            else:
-                prefixes = code.split(self.decoded_mask_id)
-        else:
+    def validate(self, code, is_final_block=False, last_step=False):
+        # Text splitting cannot validate one-token substitutions. Intermediate
+        # masked responses must use check_is_reachable on the actual token IDs.
+        if not self.enable_oppurtunistic or not last_step:
             return False
+        return self.dfa.matches(code) if is_final_block else self.dfa.prefix_matches(code)
 
     def traverse_token_path(self, tokens, initial_state):
-        current_state = initial_state
+        state = int(initial_state)
         for token in tokens:
-            try:
-                assert len(self.token_transitions[(current_state, token)]) == 1
-                current_state = self.token_transitions[(current_state, token)][0]
-            except:
+            destinations = self.token_transitions.get((state, int(token)), [])
+            if len(destinations) != 1:
                 return None, True
-        return current_state, False
+            state = destinations[0]
+        return state, False
 
-    def check_is_reachable(self, tokens, is_final_block = False):
-        """
-        Return True iff *at least one* path produced by `tokens` can take us
-        from `initial_state` to any state in `final_states`.
-
-        self.token_transitions is expected to map (state, token) -> list[int]
-        (an empty list or a missing key = no outgoing edges for that pair).
-        """
-        final_states = self.final_states if is_final_block else None
-        # start with the single initial state
-        current = {self.initial_state}
-
+    def reachable_states(self, tokens, initial_state=None):
+        current = {self.initial_state if initial_state is None else int(initial_state)}
         for token in tokens:
-            next_states = set()
+            current = {d for s in current for d in self.token_transitions.get((s, int(token)), [])}
+            if not current:
+                break
+        return current
 
-            for state in current:
-                for nxt in self.token_transitions.get((state, token), []):
-                    next_states.add(nxt)
+    def check_is_reachable(self, tokens, is_final_block=False):
+        targets = self.final_states if is_final_block else self.live_states
+        return not self.reachable_states(tokens).isdisjoint(targets)
 
-            if not next_states:
-                return False
+    def completion_targets(self, remaining_tokens, device=None):
+        """Cached states with an accepting path of exactly this many real tokens.
 
-            current = next_states  
-            
-        if final_states is not None:
-            return not current.isdisjoint(final_states)
+        Returned masks are shared runtime tensors; callers must not mutate them.
+        The default device follows dst_to_final, including stores moved to CUDA.
+        """
+        if remaining_tokens < 0:
+            raise ValueError("remaining_tokens must be nonnegative")
+        device = torch.device(self.dst_to_final.device if device is None else device)
+        if device.type == "cuda" and device.index is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        runtime = self.__dict__.setdefault("_runtime_completion", {})
+        cached = runtime.setdefault(device, {"masks": {}})
+        masks = cached["masks"]
+        if remaining_tokens in masks:
+            return masks[remaining_tokens]
+        # A real self-loop on each final state makes minimum distance enough.
+        if self.acceptance_can_pad:
+            if "distances" not in cached:
+                cached["distances"] = self.dst_to_final.to(device)
+            masks[remaining_tokens] = cached["distances"] <= remaining_tokens
         else:
-            return current is not None
-
+            if "pairs" not in cached:
+                pairs = {
+                    (s, d)
+                    for (s, token), destinations in self.token_transitions.items()
+                    if token != self.mask_token_id
+                    for d in destinations
+                }
+                cached["pairs"] = (
+                    torch.tensor(sorted(pairs), dtype=torch.long, device=device).reshape(-1, 2).t()
+                )
+                masks[0] = torch.zeros(self.num_states, dtype=torch.bool, device=device)
+                masks[0][self.final_states] = True
+            src, dst = cached["pairs"]
+            for length in range(max(masks) + 1, remaining_tokens + 1):
+                targets = torch.zeros(self.num_states, dtype=torch.bool, device=device)
+                targets[src[masks[length - 1][dst]]] = True
+                masks[length] = targets
+        return masks[remaining_tokens]
 
     def ar_logits_process(self, input_ids, scores):
-        # Use self.state_to_valid_transitions to set the scores to -inf for invalid transitions
-        current_state, some_error = self.traverse_token_path(input_ids[0].tolist(), self.initial_state)
-        if some_error:
-            scores[:, :, :] = -float('inf')
-            return scores
-            
-        accept_mask = self.state_to_valid_transitions[current_state]
-        
-        if len(accept_mask) < scores.shape[2]:
-            # pad the accept_mask with False
-            accept_mask = torch.cat([accept_mask, torch.zeros(scores.shape[2] - len(accept_mask), dtype=torch.bool)])
-
-        scores[:, :, ~accept_mask] = -float('inf')
-        return scores
+        current = self.reachable_states(input_ids[0].tolist())
+        accept = torch.zeros(scores.shape[-1], dtype=torch.bool, device=scores.device)
+        for state in current:
+            valid = self.state_to_valid_transitions.get(state)
+            if valid is not None:
+                accept[valid.to(scores.device)] = True
+        return scores.masked_fill(~accept, -float("inf"))
 
 
-def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device, enable_oppurtunistic = False, shift_mdm_trans_cuda = False):
+def build_for_dataset(
+    dataset,
+    schema_key,
+    task_name,
+    do_cot,
+    tokenizer,
+    device,
+    enable_oppurtunistic=False,
+    shift_mdm_trans_cuda=False,
+):
     if schema_key is None:
         start_time = time.time()
-        dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(None, None, tokenizer)
+        dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(
+            None, None, tokenizer
+        )
         end_time = time.time()
         print(f"Time taken to build DFA store: {end_time - start_time} seconds")
         if shift_mdm_trans_cuda:
@@ -400,16 +397,18 @@ def build_for_dataset(dataset, schema_key, task_name, do_cot, tokenizer, device,
         dfa_store.edge_src_nomdm = dfa_store.edge_src_nomdm.to(device)
         dfa_store.edge_dst_nomdm = dfa_store.edge_dst_nomdm.to(device)
         dfa_store.edge_tok_nomdm = dfa_store.edge_tok_nomdm.to(device)
-        #dfa_store.dst_to_final = dfa_store.dst_to_final.to(device)
+        # dfa_store.dst_to_final = dfa_store.dst_to_final.to(device)
         return [dfa_store] * len(dataset)
     else:
         times = []
         dfa_stores = []
         for row in tqdm(dataset, total=len(dataset), desc="Building DFA stores"):
             schema = row[schema_key]
-            idx = row['idx']
+            idx = row["idx"]
             start_time = time.time()
-            dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(schema, idx, tokenizer)
+            dfa_store = DFAMatrixStore(task_name, do_cot, enable_oppurtunistic).build(
+                schema, idx, tokenizer
+            )
             end_time = time.time()
             times.append(end_time - start_time)
             dfa_stores.append(dfa_store)

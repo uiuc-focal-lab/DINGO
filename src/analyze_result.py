@@ -1,5 +1,8 @@
-import fire 
-import srsly 
+import fire
+import srsly
+
+from result_utils import align_results
+
 
 def main(first, second):
     first = srsly.read_jsonl(first)
@@ -10,26 +13,28 @@ def main(first, second):
     both = []
     neither = []
 
-    for i, (one, two) in enumerate(zip(first, second)):
-        if one['correct'] == False and two['correct'] == True:
-            second_only.append(i + 1)
-        
-        elif one['correct'] == True and two['correct'] == False:
-            first_only.append(i + 1)
-        
-        elif one['correct'] and two['correct']:
-            both.append(i + 1)
-        
+    for one, two in align_results(first, second):
+        i = one["idx"]
+        if not one["correct"] and two["correct"]:
+            second_only.append(i)
+
+        elif one["correct"] and not two["correct"]:
+            first_only.append(i)
+
+        elif one["correct"] and two["correct"]:
+            both.append(i)
+
         else:
-            neither.append(i + 1)
+            neither.append(i)
 
-    print('Both (Total, ids) ', len(both), both )
+    print("Both (Total, ids) ", len(both), both)
     print()
-    print('Neither (Total, ids) ', len(neither), neither)
+    print("Neither (Total, ids) ", len(neither), neither)
     print()
-    print('First Only (Total, ids) ', len(first_only), first_only)
+    print("First Only (Total, ids) ", len(first_only), first_only)
     print()
-    print('Second Only (Total, ids) ', len(second_only), second_only)
+    print("Second Only (Total, ids) ", len(second_only), second_only)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     fire.Fire(main)

@@ -1,6 +1,6 @@
-import srsly 
+import fire
 import numpy as np
-import fire 
+import srsly
 
 
 def get_avgs(path):
@@ -9,16 +9,18 @@ def get_avgs(path):
     corrects = []
     parses = []
     for r in res:
-        times.append(r['time'])
-        corrects.append(r['correct'])
-        parses.append(r['parses'])
-    
-    print('Mean Accuracy ', np.mean(corrects))
-    print('Mean Time ', np.mean(times))
-    return {'acc': round(100 * np.mean(corrects),2),
-            'time': round(np.mean(times), 2), 
-            'parses': round(100 * np.mean(parses), 2)
-            }
+        times.append(r["time"])
+        corrects.append(r["correct"])
+        parses.append(r["parses"])
 
-if __name__ == '__main__':
+    print("Mean Accuracy ", np.mean(corrects))
+    print("Mean Time ", np.mean(times))
+    return {
+        "acc": round(100 * np.mean(corrects), 2),
+        "time": round(np.mean(times), 2),
+        "parses": round(100 * np.mean(parses), 2),
+    }
+
+
+if __name__ == "__main__":
     fire.Fire(get_avgs)

@@ -1,19 +1,2 @@
-accelerate
-fire
-interegular
-regex==2023.8.8
-torch
-tqdm
-syncode
-datasets
-jsonschema
-intxeger
-word2number
-Pebble
-timeout-decorator
-func_timeout
-z3-solver
-ray
-maturin
-srsly
-outlines_core==0.2.9
+-r requirements-base.txt
+transformers==4.46.2
