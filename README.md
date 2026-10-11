@@ -54,4 +54,4 @@ Results are saved as JSONL files in the `logging/` directory, organized by datas
 
 ## License
 
-[Add your license information here]
+This project is licensed under the [MIT License](LICENSE).
