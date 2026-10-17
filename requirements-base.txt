@@ -1,0 +1,16 @@
+accelerate
+datasets>=3
+dill
+fire
+jsonschema
+lark
+maturin
+numpy
+pandas
+PyYAML
+ray
+srsly
+setuptools
+torch>=2.1
+tqdm
+z3-solver

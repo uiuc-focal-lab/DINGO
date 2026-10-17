@@ -1,0 +1,13 @@
+[package]
+name = "rust_dfa"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "rust_dfa"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.18.0", features = ["extension-module"] }
+regex-automata = "0.4.9"
